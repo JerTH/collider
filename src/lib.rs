@@ -9,7 +9,7 @@
 pub(crate) mod macros;
 pub(crate) mod id;
 pub(crate) mod db;
-pub(crate) mod components;
+pub(crate) mod comps;
 pub(crate) mod family;
 pub(crate) mod xform;
 
@@ -17,7 +17,7 @@ pub(crate) mod xform;
 
 pub use db::EntityDatabase;
 pub use id::EntityId;
-pub use components::Component;
+pub use comps::Component;
 pub use xform::Read;
 pub use xform::Write;
 pub use xform::Phase;

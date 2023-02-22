@@ -29,6 +29,12 @@ pub(crate) struct ComponentTypeSet(pub(crate) Arc<BTreeSet<ComponentType>>);
 impl Component for () {}
 
 // `ComponentType`
+impl ComponentType {
+    pub fn of<T>() -> Self where T: Component {
+        StableTypeId::of::<T>().into()
+    }
+}
+
 impl Debug for ComponentType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "ComponentType({:X?}:{:?})", self.0.0, self.0)

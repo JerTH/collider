@@ -1,8 +1,11 @@
 use std::any::TypeId;
 use std::collections::HashMap;
+use std::collections::HashSet;
+use std::marker::PhantomData;
 
 use crate::EntityDatabase;
 use crate::Component;
+use crate::comps::ComponentType;
 
 #[derive(Debug)]
 pub struct TransformSuccess;
@@ -29,7 +32,7 @@ impl<T> ImplTransformId for T where T: Transformation {
 /// Transformations may run in parallel, or in sequence, as determined by the arrangement of
 /// the phases they reside in, as well as the internal contention within a `Phase`
 pub trait Transformation: 'static {
-    type Data;
+    type Data: TransformData;
     fn run(data: Self::Data) -> TransformResult;
 }
 
@@ -72,7 +75,7 @@ impl Phase {
             transforms: Default::default()
         }
     }
-
+    
     pub fn run_on(&mut self, db: &EntityDatabase) -> TransformResult {
         for (_id, transform) in self.transforms.iter_mut() {
             transform.run(db)?;
@@ -94,3 +97,138 @@ pub struct Read<T: Component> {
 pub struct Write<T: Component> {
     _phantom: std::marker::PhantomData<T>,
 }
+
+pub trait Reads<C: Component> {}
+pub trait Writes<C: Component> {}
+
+impl<T> Reads<T> for Read<T> where T: Component {}
+impl<T> Writes<T> for Write<T> where T: Component {}
+
+pub struct ReadIter<C> { _phantom: PhantomData<C> }
+pub struct WriteIter<C> { _phantom: PhantomData<C> }
+
+pub trait SelectOne {
+    type Iterator;
+    type Inner;
+    fn select_one(db: &EntityDatabase) -> Self;
+}
+
+impl<C> SelectOne for Read<C>
+    where 
+        C: Component,
+{
+    type Iterator = ReadIter<C>;
+    type Inner = C;
+
+    fn select_one(db: &EntityDatabase) -> Self {
+        db.select_read::<C>()
+    }
+}
+
+impl<C> SelectOne for Write<C>
+    where
+        C: Component,
+{
+    type Iterator = WriteIter<C>;
+    type Inner = C;
+
+    fn select_one(db: &EntityDatabase) -> Self {
+        db.select_write::<C>()
+    }
+}
+
+trait Metadata {
+    fn reads() -> Option<ComponentType> { None }
+    fn writes() -> Option<ComponentType> { None }
+}
+
+impl<T> Metadata for Read<T> where T: Component {
+    fn reads() -> Option<ComponentType> {
+        Some(ComponentType::of::<T>())
+    }
+}
+
+impl<T> Metadata for Write<T> where T: Component {
+    fn writes() -> Option<ComponentType> {
+        Some(ComponentType::of::<T>())
+    }
+}
+
+#[derive(Debug)]
+pub struct RwSet {
+    r: HashSet<ComponentType>,
+    w: HashSet<ComponentType>,
+}
+
+impl RwSet {
+    pub fn reads(&self) -> &HashSet<ComponentType> {
+        &self.r
+    }
+
+    pub fn writes(&self) -> &HashSet<ComponentType> {
+        &self.w
+    }
+}
+
+pub trait TransformData {
+    fn rw_set() -> RwSet;
+    fn arity() -> usize;
+    fn make(db: &EntityDatabase) -> Self;
+}
+
+macro_rules! one {
+    ($t:tt) => { 1usize };
+}
+
+macro_rules! impl_tdata_tuple {
+    ($($t:tt),+) => {
+        impl<$($t,)+> TransformData for ($($t,)+)
+            where
+                $($t: Metadata,)+
+                $($t: SelectOne,)+
+        {
+            fn rw_set() -> RwSet {
+                let rset: HashSet<ComponentType> = vec![$($t::reads(),)+]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+
+                let wset: HashSet<ComponentType> = vec![$($t::writes(),)+]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+
+                RwSet {
+                    r: rset,
+                    w: wset,
+                }
+            }
+
+            fn arity() -> usize {
+                [
+                    $(
+                        one!($t)
+                    ),+
+                ].len()
+            }
+
+            fn make(db: &EntityDatabase) -> Self
+            {
+                ($($t::select_one(&db),)+)
+            }
+        }
+    };
+}
+
+impl_tdata_tuple!(A);
+impl_tdata_tuple!(A, B);
+impl_tdata_tuple!(A, B, C);
+impl_tdata_tuple!(A, B, C, D);
+impl_tdata_tuple!(A, B, C, D, E);
+impl_tdata_tuple!(A, B, C, D, E, F);
+impl_tdata_tuple!(A, B, C, D, E, F, G);
+impl_tdata_tuple!(A, B, C, D, E, F, G, H);
+impl_tdata_tuple!(A, B, C, D, E, F, G, H, I);
+impl_tdata_tuple!(A, B, C, D, E, F, G, H, I, J);
+impl_tdata_tuple!(A, B, C, D, E, F, G, H, I, J, K);
+impl_tdata_tuple!(A, B, C, D, E, F, G, H, I, J, K, L);

@@ -110,7 +110,7 @@ mod vehicle_example {
             Ok(TransformSuccess)
         }        
     }
-
+    
     #[test]
     fn vehicle_example() {
         let mut db = EntityDatabase::new();

@@ -17,10 +17,15 @@ use crate::family::EntityFamilyMap;
 use crate::family::ContainingFamiliesMap;
 use crate::family::ComponentSetFamilyMap;
 use crate::family::Family;
-use crate::components::ComponentDelta;
-use crate::components::ComponentTypeSet;
-use crate::components::ComponentType;
-use crate::components::Component;
+use crate::comps::ComponentDelta;
+use crate::comps::ComponentTypeSet;
+use crate::comps::ComponentType;
+use crate::comps::Component;
+use crate::xform::Read;
+use crate::xform::ReadIter;
+use crate::xform::TransformData;
+use crate::xform::Write;
+use crate::xform::WriteIter;
 
 /// The database itself. This is the interface for consuming code
 #[derive(Debug)]
@@ -327,7 +332,15 @@ impl EntityDatabase {
         id
     }
 
-    pub fn select<T>(&self) -> T {
+    pub fn select<T: TransformData>(&self) -> T {
+        T::make(&self)
+    }
+    
+    pub fn select_read<T>(&self) -> Read<T> where T: Component {
+        todo!()
+    }
+
+    pub fn select_write<T>(&self) -> Write<T> where T: Component {
         todo!()
     }
 }

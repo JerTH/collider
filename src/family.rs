@@ -3,8 +3,8 @@ use std::ops::Deref;
 use std::collections::HashMap;
 use std::ops::DerefMut;
 
-use crate::components::ComponentType;
-use crate::components::ComponentTypeSet;
+use crate::comps::ComponentType;
+use crate::comps::ComponentTypeSet;
 use crate::id::EntityId;
 use crate::id::FamilyId;
 
