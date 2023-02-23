@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::collections::HashSet;
 use std::ops::Deref;
 use std::collections::HashMap;
 use std::ops::DerefMut;
@@ -66,7 +67,7 @@ pub(crate) struct FamilyGraphEdge {
 }
 
 #[derive(Default, Clone, PartialEq, Eq, Debug)]
-pub(crate) struct SubFamilies(Arc<Vec<FamilyId>>);
+pub struct SubFamilies(Arc<HashSet<FamilyId>>);
 
 /// Maps component type sets to lists of families where
 /// the family contains at least the components in the type set

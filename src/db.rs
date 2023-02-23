@@ -343,11 +343,11 @@ impl EntityDatabase {
     }
     
     pub fn select_read<T>(&self) -> Read<T> where T: Component {
-        todo!()
+        Read::new()
     }
 
     pub fn select_write<T>(&self) -> Write<T> where T: Component {
-        todo!()
+        Write::new()
     }
 
     pub(crate) fn sub_families(&self, set: ComponentTypeSet) -> Option<SubFamilies> {

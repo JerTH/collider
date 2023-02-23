@@ -4,6 +4,7 @@
 
 #![feature(const_type_name)]
 #![feature(once_cell)]
+#![feature(return_position_impl_trait_in_trait)]
 
 #[macro_use]
 pub(crate) mod macros;

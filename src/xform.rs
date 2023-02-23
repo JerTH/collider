@@ -36,17 +36,23 @@ impl<T> ImplTransformId for T where T: Transformation {
 /// the phases they reside in, as well as the internal contention within a `Phase`
 pub trait Transformation: 'static {
     type Data: Selection;
-    fn run(data: Self::Data) -> TransformResult;
+    fn run(data: Rows<Self::Data>) -> TransformResult;
 }
 
 trait Runs {
     fn run_on(&mut self, db: &EntityDatabase) -> TransformResult;
 }
 
-impl<T> Runs for T where T: Transformation {
-    fn run_on(&mut self, db: &EntityDatabase) -> TransformResult {
+impl<'a, T> Runs for T
+    where
+        T: Transformation,
+        T::Data: Selection,
+{
+    fn run_on(&mut self, db: &EntityDatabase) -> TransformResult
+    {
         let data = db.select::<T::Data>();
-        T::run(data)
+        let rows = T::Data::as_row::<T::Data>();
+        T::run(rows)
     }
 }
 
@@ -120,11 +126,59 @@ impl<'a, T> Metadata for Write<T> where T: Component {
     }
 }
 
-pub(crate) trait SelectOne<'a> {
-    type Inner;
+pub trait SelectOne<'a> {
+    type Ref;
     type Iterator;
     fn select_one(db: &EntityDatabase) -> Self;
     fn iterate_with(db: &'a EntityDatabase, sub_families: SubFamilies) -> Self::Iterator;
+}
+
+
+
+/// How the consumer makes a selection. A selection is simply a
+/// tuple of one or multiple Read<T> and Write<T> structures where
+/// each T can be a different component type
+pub trait Selection {
+    fn rw_set() -> RwSet;
+    fn arity() -> usize;
+    fn make(db: &EntityDatabase) -> Self;
+    fn as_row<'a, T>() -> Rows<'a, T>;
+}
+
+
+
+/// The reference side of a `Selection` used for iteration
+/// Where a `Selection` is a tuple of `Read`'s and `Write`'s, a `Row
+/// is a tuple of `ReadIter`'s and `WriteIter`'s. The iterators differ
+/// from their counterparts in that they each actually hold a references
+/// to the underlying database and thus have associated lifetimes
+pub trait ImplRow<'a> {
+    type IteratorTuple;
+    fn from_selection(db: &'a EntityDatabase, select: impl Selection) -> Self::IteratorTuple;
+    fn as_row<T>(sub_families: SubFamilies, db: &'a EntityDatabase) -> Rows<'a, T> where T: ImplRow<'a>;
+}
+
+
+
+pub struct Rows<'a, T> {
+    db: &'a EntityDatabase,
+    sub_families: SubFamilies,
+    _p: PhantomData<T>,
+}
+
+
+
+#[derive(Default)]
+pub struct Read<T: Component> {
+    _p: PhantomData<T>,
+}
+
+impl<T: Component> Read<T> {
+    pub(crate) fn new() -> Self {
+        Self {
+            _p: PhantomData::default()
+        }
+    }
 }
 
 impl<'a, C> SelectOne<'a> for Read<C>
@@ -132,13 +186,13 @@ impl<'a, C> SelectOne<'a> for Read<C>
         Self: 'a,
         C: Component,
 {
-    type Inner = C;
+    type Ref = &'a C;
     type Iterator = ReadIter<'a, C>;
 
     fn select_one(db: &EntityDatabase) -> Self {
         db.select_read::<C>()
     }
-
+    
     fn iterate_with(db: &'a EntityDatabase, sub_families: SubFamilies) -> Self::Iterator {
         ReadIter {
             db,
@@ -148,12 +202,27 @@ impl<'a, C> SelectOne<'a> for Read<C>
     }
 }
 
+
+
+#[derive(Default)]
+pub struct Write<T: Component> {
+    _p: PhantomData<T>,
+}
+
+impl<T: Component> Write<T> {
+    pub(crate) fn new() -> Self {
+        Self {
+            _p: PhantomData::default()
+        }
+    }
+}
+
 impl<'a, C> SelectOne<'a> for Write<C>
     where
         Self: 'a,
         C: Component,
 {
-    type Inner = C;
+    type Ref = &'a mut C;
     type Iterator = WriteIter<'a, C>;
 
     fn select_one(db: &EntityDatabase) -> Self {
@@ -169,32 +238,7 @@ impl<'a, C> SelectOne<'a> for Write<C>
     }
 }
 
-/// How the consumer makes a selection. A selection is simply a
-/// tuple of one or multiple Read<T> and Write<T> structures where
-/// each T can be a different component type
-pub trait Selection {
-    fn rw_set() -> RwSet;
-    fn arity() -> usize;
-    fn make(db: &EntityDatabase) -> Self;
-}
 
-/// The reference side of a `Selection` used for iteration
-/// Where a `Selection` is a tuple of `Read`'s and `Write`'s, a `Row
-/// is a tuple of `ReadIter`'s and `WriteIter`'s. The iterators differ
-/// from their counterparts in that they each actually hold a references
-/// to the underlying database and thus have associated lifetimes
-trait Row<'a> {
-    type IteratorTuple;
-    fn from_selection(db: &'a EntityDatabase, select: impl Selection) -> Self::IteratorTuple;
-}
-
-pub struct Read<T: Component> {
-    _p: PhantomData<T>,
-}
-
-pub struct Write<T: Component> {
-    _p: PhantomData<T>,
-}
 
 /// Iterates one component kind bounded by a selection
 pub struct ReadIter<'a, T: Component> {
@@ -203,34 +247,53 @@ pub struct ReadIter<'a, T: Component> {
     _p: PhantomData<T>,
 }
 
+
+
 pub struct WriteIter<'a, T: Component> {
     db: &'a EntityDatabase,
     sub_families: SubFamilies,
     _p: PhantomData<T>,
 }
 
-/// A special iterator which traverses a collection of
-/// read and write iterators as one, the effect is this
-/// iterates each row of the database which matches the
-/// selection that generated it
-struct RowIter<'a, T> {
-    locks: Locks<T>,
+
+
+/// A special iterator which traverses rows of the
+/// database which match a selection
+pub struct RowIter<'a, T> {
+    db: &'a EntityDatabase,
+    sf: SubFamilies,
     _p: PhantomData<&'a T>
 }
 
+impl<'a, T> RowIter<'a, T> {
+    fn new(db: &'a EntityDatabase, sf: SubFamilies) -> Self {
+        RowIter {
+            db,
+            sf,
+            _p: PhantomData::default()
+        }
+    }
+}
+
+
+
 pub trait Reads<C: Component> {}
 
+
+
 pub trait Writes<C: Component> {}
+
+
 
 struct Locks<T> {
     _p: PhantomData<T>,
 }
 
-trait IntoRowIterator {
-    type Item;
-    type IntoIter;
-    fn into_iter(self) -> Self::IntoIter;
-}
+
+
+trait Guards {}
+
+
 
 #[derive(Debug)]
 pub struct RwSet {
@@ -248,13 +311,16 @@ impl RwSet {
     }
 }
 
+
+
 /// Here be dragons
 /// 
 /// These macros are what make selections possible and ergonomic. They
 /// expand into implementations for arbitrary user defined tuple
 /// combinations which represent concrete selections into the database
 /// With a large amount of components or selection kinds, this will incur
-/// some compilation overhead
+/// some compilation overhead, the trade-off however is that database
+/// access is fast and predictable
 macro_rules! impl_tdata_tuple {
     ($($t:tt),+) => {
         impl<'a, $($t,)+> Selection for ($($t,)+)
@@ -278,7 +344,7 @@ macro_rules! impl_tdata_tuple {
                     w: wset,
                 }
             }
-
+            
             fn arity() -> usize {
                 [
                     $(
@@ -291,12 +357,17 @@ macro_rules! impl_tdata_tuple {
             {
                 ($($t::select_one(&db),)+)
             }
+
+            fn as_row<'b, T>() -> Rows<'b, T> {
+                todo!()
+            }
         }
         
-        impl<'a, $($t,)+> Row<'a> for ($($t,)+)
+        impl<'a, $($t,)+> ImplRow<'a> for ($($t,)+)
             where
-                $($t: SelectOne<'a>,)+
+                ($($t,)+): Selection,
                 $($t: Metadata,)+
+                $($t: SelectOne<'a>,)+
         {
             type IteratorTuple = ($($t::Iterator,)+);
 
@@ -312,6 +383,47 @@ macro_rules! impl_tdata_tuple {
                 ($(
                     $t::iterate_with(db, sf.clone()),
                 )+)
+            }
+
+            fn as_row<T>(sub_families: SubFamilies, db: &'a EntityDatabase) -> Rows<'a, T> where T: ImplRow<'a> {
+                Rows {
+                    db,
+                    sub_families,
+                    _p: PhantomData::default(),
+                }
+            }
+        }
+
+        impl<'a, $($t,)+> Iterator for RowIter<'a, ($($t,)+)>
+            where
+                $($t: Metadata,)+
+                $($t: SelectOne<'a>,)+
+                ($($t,)+): ImplRow<'a>,
+        {
+            type Item = ($($t::Ref,)+);
+        
+            fn next(&mut self) -> Option<Self::Item> {
+                todo!()
+            }
+        }
+        
+        impl<'a, $($t,)+> IntoIterator for Rows<'a, ($($t,)+)>
+            where
+                $($t: Metadata,)+
+                $($t: SelectOne<'a>,)+
+                $($t: 'a,)+
+                ($($t,)+): ImplRow<'a>,
+        {
+            type Item = ($($t::Ref,)+);
+
+            type IntoIter = RowIter<'a, ($($t,)+)>;
+
+            fn into_iter(self) -> Self::IntoIter {
+                RowIter {
+                    db: self.db,
+                    sf: self.sub_families,
+                    _p: PhantomData::default(),
+                }
             }
         }
     };

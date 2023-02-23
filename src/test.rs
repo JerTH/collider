@@ -46,6 +46,8 @@ fn stable_ids() {
 
 /// Vehicle Example
 mod vehicle_example {
+    use crate::xform::Rows;
+
     use super::*;
 
     #[derive(Debug, Default)]
@@ -103,11 +105,10 @@ mod vehicle_example {
     impl Transformation for Drive {
         type Data = (Read<Physics>, Write<Transmission>, Write<Engine>);
 
-        fn run(data: Self::Data) -> Result<TransformSuccess, TransformError> {
-            let (physics, mut transmission, mut engine) = data;
+        fn run(data: Rows<Self::Data>) -> Result<TransformSuccess, TransformError> {
 
             for (p, t, e) in data {
-                    
+                
             }
 
             Ok(TransformSuccess)
