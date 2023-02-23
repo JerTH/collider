@@ -99,18 +99,21 @@ mod vehicle_example {
         }
     }
     
-    // Driver selects gears and applies throttle
-    struct Driver {}
-    impl Transformation for Driver {
+    struct Drive {}
+    impl Transformation for Drive {
         type Data = (Read<Physics>, Write<Transmission>, Write<Engine>);
 
         fn run(data: Self::Data) -> Result<TransformSuccess, TransformError> {
             let (physics, mut transmission, mut engine) = data;
-            
+
+            for (p, t, e) in data {
+                    
+            }
+
             Ok(TransformSuccess)
         }        
     }
-    
+
     #[test]
     fn vehicle_example() {
         let mut db = EntityDatabase::new();
@@ -148,7 +151,7 @@ mod vehicle_example {
         db.add_component(pickup_truck, Physics::new()).unwrap();
 
         let mut phase_one = Phase::new();
-        phase_one.add_transformation(Driver{});
+        phase_one.add_transformation(Drive{});
 
         phase_one.run_on(&db).unwrap();
 

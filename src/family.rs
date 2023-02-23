@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::ops::Deref;
 use std::collections::HashMap;
 use std::ops::DerefMut;
+use std::sync::Arc;
 
 use crate::comps::ComponentType;
 use crate::comps::ComponentTypeSet;
@@ -63,6 +64,14 @@ pub(crate) struct FamilyGraphEdge {
     pub(crate) component: ComponentType,
     pub(crate) delta: FamilyDelta,
 }
+
+#[derive(Default, Clone, PartialEq, Eq, Debug)]
+pub(crate) struct SubFamilies(Arc<Vec<FamilyId>>);
+
+/// Maps component type sets to lists of families where
+/// the family contains at least the components in the type set
+#[derive(Default, Clone, PartialEq, Eq, Debug)]
+pub(crate) struct SubFamilyMap(HashMap<ComponentTypeSet, SubFamilies>);
 
 // Impl's
 
@@ -140,6 +149,21 @@ impl Deref for EntityFamilyMap {
 }
 
 impl DerefMut for EntityFamilyMap {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+// `SubFamilyMap`
+impl Deref for SubFamilyMap {
+    type Target = HashMap<ComponentTypeSet, SubFamilies>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+
+}
+
+impl DerefMut for SubFamilyMap {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }

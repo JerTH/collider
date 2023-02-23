@@ -3,9 +3,12 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::marker::PhantomData;
 
-use crate::EntityDatabase;
-use crate::Component;
+use crate::db::EntityDatabase;
+use crate::comps::Component;
 use crate::comps::ComponentType;
+use crate::comps::ComponentTypeSet;
+use crate::family::SubFamilies;
+use crate::family::SubFamilyMap;
 
 #[derive(Debug)]
 pub struct TransformSuccess;
@@ -32,7 +35,7 @@ impl<T> ImplTransformId for T where T: Transformation {
 /// Transformations may run in parallel, or in sequence, as determined by the arrangement of
 /// the phases they reside in, as well as the internal contention within a `Phase`
 pub trait Transformation: 'static {
-    type Data: TransformData;
+    type Data: Selection;
     fn run(data: Self::Data) -> TransformResult;
 }
 
@@ -90,68 +93,143 @@ impl Phase {
     }
 }
 
-pub struct Read<T: Component> {
-    _phantom: std::marker::PhantomData<T>,
+/// Selection-level meta data associated with a component
+trait Metadata {
+    fn reads() -> Option<ComponentType> { None }
+    fn writes() -> Option<ComponentType> { None }
+    fn component_type() -> ComponentType;
 }
 
-pub struct Write<T: Component> {
-    _phantom: std::marker::PhantomData<T>,
+impl<'a, T> Metadata for Read<T> where T: Component {
+    fn reads() -> Option<ComponentType> {
+        Some(ComponentType::of::<T>())
+    }
+
+    fn component_type() -> ComponentType {
+        ComponentType::of::<T>()
+    }
 }
 
-pub trait Reads<C: Component> {}
-pub trait Writes<C: Component> {}
+impl<'a, T> Metadata for Write<T> where T: Component {
+    fn writes() -> Option<ComponentType> {
+        Some(ComponentType::of::<T>())
+    }
 
-impl<T> Reads<T> for Read<T> where T: Component {}
-impl<T> Writes<T> for Write<T> where T: Component {}
+    fn component_type() -> ComponentType {
+        ComponentType::of::<T>()
+    }
+}
 
-pub struct ReadIter<C> { _phantom: PhantomData<C> }
-pub struct WriteIter<C> { _phantom: PhantomData<C> }
-
-pub trait SelectOne {
-    type Iterator;
+pub(crate) trait SelectOne<'a> {
     type Inner;
+    type Iterator;
     fn select_one(db: &EntityDatabase) -> Self;
+    fn iterate_with(db: &'a EntityDatabase, sub_families: SubFamilies) -> Self::Iterator;
 }
 
-impl<C> SelectOne for Read<C>
+impl<'a, C> SelectOne<'a> for Read<C>
     where 
+        Self: 'a,
         C: Component,
 {
-    type Iterator = ReadIter<C>;
     type Inner = C;
+    type Iterator = ReadIter<'a, C>;
 
     fn select_one(db: &EntityDatabase) -> Self {
         db.select_read::<C>()
     }
+
+    fn iterate_with(db: &'a EntityDatabase, sub_families: SubFamilies) -> Self::Iterator {
+        ReadIter {
+            db,
+            sub_families,
+            _p: PhantomData::default(),
+        }
+    }
 }
 
-impl<C> SelectOne for Write<C>
+impl<'a, C> SelectOne<'a> for Write<C>
     where
+        Self: 'a,
         C: Component,
 {
-    type Iterator = WriteIter<C>;
     type Inner = C;
+    type Iterator = WriteIter<'a, C>;
 
     fn select_one(db: &EntityDatabase) -> Self {
         db.select_write::<C>()
     }
-}
 
-trait Metadata {
-    fn reads() -> Option<ComponentType> { None }
-    fn writes() -> Option<ComponentType> { None }
-}
-
-impl<T> Metadata for Read<T> where T: Component {
-    fn reads() -> Option<ComponentType> {
-        Some(ComponentType::of::<T>())
+    fn iterate_with(db: &'a EntityDatabase, sub_families: SubFamilies) -> Self::Iterator {
+        WriteIter {
+            db,
+            sub_families,
+            _p: PhantomData::default(),
+        }
     }
 }
 
-impl<T> Metadata for Write<T> where T: Component {
-    fn writes() -> Option<ComponentType> {
-        Some(ComponentType::of::<T>())
-    }
+/// How the consumer makes a selection. A selection is simply a
+/// tuple of one or multiple Read<T> and Write<T> structures where
+/// each T can be a different component type
+pub trait Selection {
+    fn rw_set() -> RwSet;
+    fn arity() -> usize;
+    fn make(db: &EntityDatabase) -> Self;
+}
+
+/// The reference side of a `Selection` used for iteration
+/// Where a `Selection` is a tuple of `Read`'s and `Write`'s, a `Row
+/// is a tuple of `ReadIter`'s and `WriteIter`'s. The iterators differ
+/// from their counterparts in that they each actually hold a references
+/// to the underlying database and thus have associated lifetimes
+trait Row<'a> {
+    type IteratorTuple;
+    fn from_selection(db: &'a EntityDatabase, select: impl Selection) -> Self::IteratorTuple;
+}
+
+pub struct Read<T: Component> {
+    _p: PhantomData<T>,
+}
+
+pub struct Write<T: Component> {
+    _p: PhantomData<T>,
+}
+
+/// Iterates one component kind bounded by a selection
+pub struct ReadIter<'a, T: Component> {
+    db: &'a EntityDatabase,
+    sub_families: SubFamilies,
+    _p: PhantomData<T>,
+}
+
+pub struct WriteIter<'a, T: Component> {
+    db: &'a EntityDatabase,
+    sub_families: SubFamilies,
+    _p: PhantomData<T>,
+}
+
+/// A special iterator which traverses a collection of
+/// read and write iterators as one, the effect is this
+/// iterates each row of the database which matches the
+/// selection that generated it
+struct RowIter<'a, T> {
+    locks: Locks<T>,
+    _p: PhantomData<&'a T>
+}
+
+pub trait Reads<C: Component> {}
+
+pub trait Writes<C: Component> {}
+
+struct Locks<T> {
+    _p: PhantomData<T>,
+}
+
+trait IntoRowIterator {
+    type Item;
+    type IntoIter;
+    fn into_iter(self) -> Self::IntoIter;
 }
 
 #[derive(Debug)]
@@ -170,22 +248,19 @@ impl RwSet {
     }
 }
 
-pub trait TransformData {
-    fn rw_set() -> RwSet;
-    fn arity() -> usize;
-    fn make(db: &EntityDatabase) -> Self;
-}
-
-macro_rules! one {
-    ($t:tt) => { 1usize };
-}
-
+/// Here be dragons
+/// 
+/// These macros are what make selections possible and ergonomic. They
+/// expand into implementations for arbitrary user defined tuple
+/// combinations which represent concrete selections into the database
+/// With a large amount of components or selection kinds, this will incur
+/// some compilation overhead
 macro_rules! impl_tdata_tuple {
     ($($t:tt),+) => {
-        impl<$($t,)+> TransformData for ($($t,)+)
+        impl<'a, $($t,)+> Selection for ($($t,)+)
             where
                 $($t: Metadata,)+
-                $($t: SelectOne,)+
+                $($t: SelectOne<'a>,)+
         {
             fn rw_set() -> RwSet {
                 let rset: HashSet<ComponentType> = vec![$($t::reads(),)+]
@@ -211,13 +286,39 @@ macro_rules! impl_tdata_tuple {
                     ),+
                 ].len()
             }
-
+            
             fn make(db: &EntityDatabase) -> Self
             {
                 ($($t::select_one(&db),)+)
             }
         }
+        
+        impl<'a, $($t,)+> Row<'a> for ($($t,)+)
+            where
+                $($t: SelectOne<'a>,)+
+                $($t: Metadata,)+
+        {
+            type IteratorTuple = ($($t::Iterator,)+);
+
+            fn from_selection(db: &'a EntityDatabase, select: impl Selection) -> Self::IteratorTuple {
+                let i = [
+                    $(
+                        $t::component_type()
+                    ),+
+                ].into_iter();
+                let set = ComponentTypeSet::from_iter(i);
+
+                let sf: crate::family::SubFamilies = db.sub_families(set).expect("expected sub families");
+                ($(
+                    $t::iterate_with(db, sf.clone()),
+                )+)
+            }
+        }
     };
+}
+
+macro_rules! one {
+    ($t:tt) => { 1usize };
 }
 
 impl_tdata_tuple!(A);
@@ -232,3 +333,12 @@ impl_tdata_tuple!(A, B, C, D, E, F, G, H, I);
 impl_tdata_tuple!(A, B, C, D, E, F, G, H, I, J);
 impl_tdata_tuple!(A, B, C, D, E, F, G, H, I, J, K);
 impl_tdata_tuple!(A, B, C, D, E, F, G, H, I, J, K, L);
+
+/*
+ * Status: 
+ * The transform contains a set of (Read<A>, Write<B>, ..) which implements Selection
+ * So far we can succesfully produce that set using trait level polymorphism
+ * We need to be able to iterate the Read and Write structures, they need to strictly
+ * iterate only families where they are all present - lets do that first
+ * 
+ */

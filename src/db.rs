@@ -7,6 +7,8 @@ use std::sync::MutexGuard;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fmt::Debug;
+use crate::family::SubFamilies;
+use crate::family::SubFamilyMap;
 use crate::id::StableTypeId;
 use crate::id::FamilyId;
 use crate::id::EntityId;
@@ -22,10 +24,8 @@ use crate::comps::ComponentTypeSet;
 use crate::comps::ComponentType;
 use crate::comps::Component;
 use crate::xform::Read;
-use crate::xform::ReadIter;
-use crate::xform::TransformData;
+use crate::xform::Selection;
 use crate::xform::Write;
-use crate::xform::WriteIter;
 
 /// The database itself. This is the interface for consuming code
 #[derive(Debug)]
@@ -48,6 +48,7 @@ struct EntityRecords {
     component_sets: ComponentSetFamilyMap,
     containing: ContainingFamiliesMap,
     entities: EntityFamilyMap,
+    sub_families: SubFamilyMap,
 }
 
 /// Provides `EntityId`'s and manages their re-use
@@ -332,7 +333,12 @@ impl EntityDatabase {
         id
     }
 
-    pub fn select<T: TransformData>(&self) -> T {
+    /// Selects a set of components with read or write access from the database
+    /// 
+    /// The selection only includes components of entities which hold all of the
+    /// selected components, e.g. the family or sub-families derived from the list
+    /// of components selected
+    pub fn select<T: Selection>(&self) -> T {
         T::make(&self)
     }
     
@@ -342,6 +348,10 @@ impl EntityDatabase {
 
     pub fn select_write<T>(&self) -> Write<T> where T: Component {
         todo!()
+    }
+
+    pub(crate) fn sub_families(&self, set: ComponentTypeSet) -> Option<SubFamilies> {
+        self.records.sub_families.get(&set).cloned()
     }
 }
 
@@ -359,6 +369,7 @@ impl EntityRecords {
             component_sets: ComponentSetFamilyMap::default(),
             containing: ContainingFamiliesMap::default(),
             entities: EntityFamilyMap::default(),
+            sub_families: SubFamilyMap::default(),
         }
     }
 }

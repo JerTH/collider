@@ -2,7 +2,7 @@
 // Macros to make operations interfacing with the `EntityDatabase` more ergonomic
 macro_rules! component {
     ($a:ty) => {
-        crate::components::ComponentType::from(crate::id::StableTypeId::of::<$a>())
+        crate::comps::ComponentType::from(crate::id::StableTypeId::of::<$a>())
     };
 }
 
@@ -13,7 +13,7 @@ macro_rules! component_type_set {
             $(
                 __set.insert(component!($ct));
             )*
-            crate::components::ComponentTypeSet(Arc::new(__set))
+            crate::comps::ComponentTypeSet(Arc::new(__set))
         }
     };
 }
