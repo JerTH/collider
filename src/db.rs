@@ -22,6 +22,7 @@ use crate::family::Family;
 use crate::comps::ComponentDelta;
 use crate::comps::ComponentTypeSet;
 use crate::comps::ComponentType;
+use crate::comps::ComponentRegistry;
 use crate::comps::Component;
 use crate::xform::Read;
 use crate::xform::Selection;
@@ -33,6 +34,7 @@ pub struct EntityDatabase {
     data: EntityData,
     records: EntityRecords,
     alloc: EntityAllocator,
+    registry: ComponentRegistry,
 }
 
 /// Dumb storage which owns the raw data that entities are made of
@@ -62,12 +64,12 @@ struct EntityAllocator {
 /// 
 /// Columns are indexed by `ComponentType`'s, and rows are indexed by `EntityId`'s
 #[derive(Default)]
-struct ComponentColumn<T: Component>(HashMap<EntityId, T>);
+pub(crate) struct ComponentColumn<T: Component>(pub HashMap<EntityId, T>);
 
 
 /// Stores raw component data of a single type, describes how to interact with that data
-struct ComponentColumnEntry {
-    data: Box<dyn Any>, // ComponentColumn<T>
+pub struct ComponentColumnEntry {
+    pub data: Box<dyn Any>, // ComponentColumn<T>
     mvfn: fn(&EntityId, &mut Box<dyn Any>, &mut Box<dyn Any>),
     ctor: fn() -> Box<dyn Any>,
 }
@@ -75,7 +77,28 @@ struct ComponentColumnEntry {
 type TableEntry = HashMap<ComponentType, ComponentColumnEntry>;
 
 #[derive(Debug)]
-struct DataTableGuard<'a>(MutexGuard<'a, TableEntry>);
+pub(crate) struct DataTableGuard<'a>(MutexGuard<'a, TableEntry>);
+
+// Example flow of accessing a component:
+//
+//fn foo<'a>() -> Option<&'a ()> {
+//    type UnitComponent = ();
+//    let table = DataTable::default();
+//    let guard = table.lock();
+//    let entity = EntityId::generational(0, 0, 0, 0);
+//    let component = ComponentType::of::<UnitComponent>();
+//    match guard.get(&component) {
+//        Some(entry) => {
+//            match entry.data.downcast_ref::<ComponentColumn<UnitComponent>>() {
+//                Some(column) => {
+//                    column.get(&entity)
+//                },
+//                None => todo!(),
+//            }
+//        },
+//        None => todo!(),
+//    }
+//}
 
 /// A `DataTable` represents a single table of components unique to a family. This is where actual user
 /// application data is stored as rows and columns of components, and so its contents are dynamically typed
@@ -105,7 +128,8 @@ impl EntityDatabase {
         let mut db = EntityDatabase {
             data: EntityData::new(),
             records: EntityRecords::new(),
-            alloc: EntityAllocator::new()
+            alloc: EntityAllocator::new(),
+            registry: ComponentRegistry::new(),
         };
 
         // Register the unit/null component
@@ -126,10 +150,18 @@ impl EntityDatabase {
         self.records.component_sets.get(set).cloned()
     }
 
+    pub(crate) fn try_lock_family_table(&self, family_id: &FamilyId) -> Option<DataTableGuard> {
+        self.data.tables.get(&family_id)?
+            .try_lock().ok()
+            .map(|guard| DataTableGuard(guard))
+    }
+
     /// Attempts to find the `FamilyId` for the family the entity would belong to after the component delta is applied
     /// 
     /// Returns `None` if no suitable family exists
     fn get_family_transform(&self, entity: &EntityId, delta: ComponentDelta) -> FamilyTransform {
+        
+        // TODO: Clean up/flatten/rustify this mess of nested match statements
         match delta {
             ComponentDelta::Add(added) => {
                 // first things first, does the entity exist as far as the database is concerned?
@@ -298,17 +330,22 @@ impl EntityDatabase {
     /// 
     /// 
     pub fn add_component<T: Component>(&mut self, entity: EntityId, component: T) -> Result<(), ()> {
+        if !self.registry.seen::<T>() {
+            self.registry.register::<T>()
+        }
+
         let component_type = component!(T);
         let transform = self.get_family_transform(&entity, ComponentDelta::Add(component_type));
         self.resolve_transform(entity, component, transform)
     }
     
     /// Registers a component with the `EntityDatabase` for richer debug info 
+    #[deprecated(note = "handled by component registry")]
     pub fn register_component_debug_info<T: Component>(&mut self) {
         StableTypeId::register_debug_info::<T>();
         self.register_family(component_type_set!(T));
     }
-
+    
     /// Registers a set of components as a `Family`
     fn register_family(&mut self, set: ComponentTypeSet) -> FamilyId {
         let id: FamilyId = self.alloc.alloc().into();

@@ -3,19 +3,23 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::marker::PhantomData;
 
+use crate::EntityId;
+use crate::db::DataTableGuard;
 use crate::db::EntityDatabase;
+use crate::db::ComponentColumn;
 use crate::comps::Component;
 use crate::comps::ComponentType;
 use crate::comps::ComponentTypeSet;
 use crate::family::SubFamilies;
 use crate::family::SubFamilyMap;
+use crate::id::FamilyId;
 
 #[derive(Debug)]
 pub struct TransformSuccess;
 #[derive(Debug)]
-pub enum TransformError { }
+pub struct TransformError { }
 
-type TransformResult = Result<TransformSuccess, TransformError>;
+pub type TransformResult = Result<TransformSuccess, TransformError>;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 struct TransformId(TypeId);
@@ -50,7 +54,6 @@ impl<'a, T> Runs for T
 {
     fn run_on(&mut self, db: &EntityDatabase) -> TransformResult
     {
-        let data = db.select::<T::Data>();
         let rows = T::Data::as_row::<T::Data>();
         T::run(rows)
     }
@@ -106,6 +109,8 @@ trait Metadata {
     fn component_type() -> ComponentType;
 }
 
+
+
 impl<'a, T> Metadata for Read<T> where T: Component {
     fn reads() -> Option<ComponentType> {
         Some(ComponentType::of::<T>())
@@ -115,6 +120,8 @@ impl<'a, T> Metadata for Read<T> where T: Component {
         ComponentType::of::<T>()
     }
 }
+
+
 
 impl<'a, T> Metadata for Write<T> where T: Component {
     fn writes() -> Option<ComponentType> {
@@ -126,11 +133,21 @@ impl<'a, T> Metadata for Write<T> where T: Component {
     }
 }
 
+
+
 pub trait SelectOne<'a> {
     type Ref;
+    
     type Iterator;
+    
     fn select_one(db: &EntityDatabase) -> Self;
+    
     fn iterate_with(db: &'a EntityDatabase, sub_families: SubFamilies) -> Self::Iterator;
+    
+    fn as_ref_type(&mut self) -> Self::Ref    {
+        //self.into()
+        todo!()
+    }
 }
 
 
@@ -155,7 +172,6 @@ pub trait Selection {
 pub trait ImplRow<'a> {
     type IteratorTuple;
     fn from_selection(db: &'a EntityDatabase, select: impl Selection) -> Self::IteratorTuple;
-    fn as_row<T>(sub_families: SubFamilies, db: &'a EntityDatabase) -> Rows<'a, T> where T: ImplRow<'a>;
 }
 
 
@@ -173,6 +189,8 @@ pub struct Read<T: Component> {
     _p: PhantomData<T>,
 }
 
+
+
 impl<T: Component> Read<T> {
     pub(crate) fn new() -> Self {
         Self {
@@ -180,6 +198,8 @@ impl<T: Component> Read<T> {
         }
     }
 }
+
+
 
 impl<'a, C> SelectOne<'a> for Read<C>
     where 
@@ -209,6 +229,8 @@ pub struct Write<T: Component> {
     _p: PhantomData<T>,
 }
 
+
+
 impl<T: Component> Write<T> {
     pub(crate) fn new() -> Self {
         Self {
@@ -217,18 +239,21 @@ impl<T: Component> Write<T> {
     }
 }
 
+
+
 impl<'a, C> SelectOne<'a> for Write<C>
     where
         Self: 'a,
         C: Component,
 {
     type Ref = &'a mut C;
+
     type Iterator = WriteIter<'a, C>;
 
     fn select_one(db: &EntityDatabase) -> Self {
         db.select_write::<C>()
     }
-
+    
     fn iterate_with(db: &'a EntityDatabase, sub_families: SubFamilies) -> Self::Iterator {
         WriteIter {
             db,
@@ -240,7 +265,9 @@ impl<'a, C> SelectOne<'a> for Write<C>
 
 
 
-/// Iterates one component kind bounded by a selection
+/// Iterates one component kind in read mode bounded by a selection
+#[deprecated]
+#[allow(dead_code)]
 pub struct ReadIter<'a, T: Component> {
     db: &'a EntityDatabase,
     sub_families: SubFamilies,
@@ -249,6 +276,9 @@ pub struct ReadIter<'a, T: Component> {
 
 
 
+/// Iterates one component kind in write mode bounded by a selection
+#[deprecated]
+#[allow(dead_code)]
 pub struct WriteIter<'a, T: Component> {
     db: &'a EntityDatabase,
     sub_families: SubFamilies,
@@ -259,17 +289,26 @@ pub struct WriteIter<'a, T: Component> {
 
 /// A special iterator which traverses rows of the
 /// database which match a selection
-pub struct RowIter<'a, T> {
+pub struct RowIter<'a, T: ImplRow<'a>> {
     db: &'a EntityDatabase,
-    sf: SubFamilies,
+    next_entity: Option<EntityId>,
+    table_guard: Option<DataTableGuard<'a>>,
+    columns_iter: Option<T>, // TODO: Probably need some weird transmogrifying through traits
+    family_iter: <SubFamilies as IntoIterator>::IntoIter,
     _p: PhantomData<&'a T>
 }
 
-impl<'a, T> RowIter<'a, T> {
-    fn new(db: &'a EntityDatabase, sf: SubFamilies) -> Self {
+
+
+impl<'a, T: ImplRow<'a>> RowIter<'a, T> {
+    fn new(db: &'a EntityDatabase, sub_families: SubFamilies) -> Self {
+        let sub_family_iter = sub_families.into_iter();
         RowIter {
             db,
-            sf,
+            next_entity: None,
+            table_guard: None,
+            columns_iter: todo!(),
+            family_iter: sub_family_iter,
             _p: PhantomData::default()
         }
     }
@@ -285,12 +324,6 @@ pub trait Writes<C: Component> {}
 
 
 
-struct Locks<T> {
-    _p: PhantomData<T>,
-}
-
-
-
 trait Guards {}
 
 
@@ -300,6 +333,8 @@ pub struct RwSet {
     r: HashSet<ComponentType>,
     w: HashSet<ComponentType>,
 }
+
+
 
 impl RwSet {
     pub fn reads(&self) -> &HashSet<ComponentType> {
@@ -312,8 +347,7 @@ impl RwSet {
 }
 
 
-
-/// Here be dragons
+/// Here be macro dragons
 /// 
 /// These macros are what make selections possible and ergonomic. They
 /// expand into implementations for arbitrary user defined tuple
@@ -370,7 +404,7 @@ macro_rules! impl_tdata_tuple {
                 $($t: SelectOne<'a>,)+
         {
             type IteratorTuple = ($($t::Iterator,)+);
-
+            
             fn from_selection(db: &'a EntityDatabase, select: impl Selection) -> Self::IteratorTuple {
                 let i = [
                     $(
@@ -384,44 +418,85 @@ macro_rules! impl_tdata_tuple {
                     $t::iterate_with(db, sf.clone()),
                 )+)
             }
-
-            fn as_row<T>(sub_families: SubFamilies, db: &'a EntityDatabase) -> Rows<'a, T> where T: ImplRow<'a> {
-                Rows {
-                    db,
-                    sub_families,
-                    _p: PhantomData::default(),
-                }
-            }
         }
 
         impl<'a, $($t,)+> Iterator for RowIter<'a, ($($t,)+)>
             where
                 $($t: Metadata,)+
                 $($t: SelectOne<'a>,)+
-                ($($t,)+): ImplRow<'a>,
+                $($t: Component,)+
+                //($($t,)+): ImplRow<'a>,
         {
             type Item = ($($t::Ref,)+);
-        
+            
             fn next(&mut self) -> Option<Self::Item> {
-                todo!()
+                // just make it work even if it's slow for now
+                loop {
+                    if let Some(guard) = self.table_guard.as_mut() {
+                        // we have a locked table
+                        // build the row here
+                        let row = (
+                            $(
+                                guard.get_mut(&component!($t))?
+                                     .data.downcast_mut::<ComponentColumn<$t>>()?
+                                     .get_mut(&self.next_entity?)?
+                                     .as_ref_type()
+                            ,)+
+                        );
+                        // set the next entity
+
+                        return Some(row)
+                    } else {
+                        // we don't have a locked table, do we have a next family?
+                        match self.family_iter.next() {
+                            Some(family_id) => {
+                                // spin until we acquire the data table we're interested in
+                                // there are much better ways of doing these worth exploring
+                                // but this works for now
+                                loop {
+                                    if let Some(guard) = self.db.try_lock_family_table(&family_id) {
+                                        self.table_guard = Some(guard);
+                                        break;
+                                    } else {
+                                        std::thread::yield_now();
+                                    }
+                                }
+                            },
+                            None => {
+                                // no table and no next family - iteration is finished
+                                return None;
+                            }
+                        }
+                    }
+                }
             }
         }
         
+        #[allow(unreachable_code)]
         impl<'a, $($t,)+> IntoIterator for Rows<'a, ($($t,)+)>
             where
                 $($t: Metadata,)+
                 $($t: SelectOne<'a>,)+
+                $($t: Component,)+
+                //($($t,)+): ImplRow<'a>,
                 $($t: 'a,)+
-                ($($t,)+): ImplRow<'a>,
         {
             type Item = ($($t::Ref,)+);
 
             type IntoIter = RowIter<'a, ($($t,)+)>;
 
             fn into_iter(self) -> Self::IntoIter {
+                let next_entity = None;
+                let table_guard = None;
+                let family_iter = self.sub_families.into_iter();
+                let columns_iter = todo!();
+
                 RowIter {
                     db: self.db,
-                    sf: self.sub_families,
+                    next_entity,
+                    table_guard,
+                    columns_iter,
+                    family_iter,
                     _p: PhantomData::default(),
                 }
             }
@@ -446,11 +521,3 @@ impl_tdata_tuple!(A, B, C, D, E, F, G, H, I, J);
 impl_tdata_tuple!(A, B, C, D, E, F, G, H, I, J, K);
 impl_tdata_tuple!(A, B, C, D, E, F, G, H, I, J, K, L);
 
-/*
- * Status: 
- * The transform contains a set of (Read<A>, Write<B>, ..) which implements Selection
- * So far we can succesfully produce that set using trait level polymorphism
- * We need to be able to iterate the Read and Write structures, they need to strictly
- * iterate only families where they are all present - lets do that first
- * 
- */

@@ -155,6 +155,17 @@ impl DerefMut for EntityFamilyMap {
     }
 }
 
+// `SubFamilies`
+impl IntoIterator for SubFamilies {
+    type Item = FamilyId;
+
+    type IntoIter = <HashSet<FamilyId> as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        todo!()
+    }
+}
+
 // `SubFamilyMap`
 impl Deref for SubFamilyMap {
     type Target = HashMap<ComponentTypeSet, SubFamilies>;

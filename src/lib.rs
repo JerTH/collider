@@ -25,3 +25,4 @@ pub use xform::Phase;
 pub use xform::Transformation;
 pub use xform::TransformError;
 pub use xform::TransformSuccess;
+pub use xform::TransformResult;

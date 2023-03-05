@@ -96,8 +96,11 @@ mod vehicle_example {
     impl Transformation for DriveTrain {
         type Data = (Read<Engine>, Read<Transmission>, Write<Wheels>);
 
-        fn run(data: Self::Data) -> Result<TransformSuccess, TransformError> {
-            todo!()
+        fn run(data: Rows<Self::Data>) -> Result<TransformSuccess, TransformError> {
+            for (e, t, w) in data {
+                
+            }
+            Ok(TransformSuccess)
         }
     }
     
@@ -106,21 +109,32 @@ mod vehicle_example {
         type Data = (Read<Physics>, Write<Transmission>, Write<Engine>);
 
         fn run(data: Rows<Self::Data>) -> Result<TransformSuccess, TransformError> {
-
             for (p, t, e) in data {
-                
+
             }
 
             Ok(TransformSuccess)
         }        
     }
 
+    struct WheelPhysics {}
+    impl Transformation for WheelPhysics {
+        type Data = (Read<Wheels>, Write<Physics>);
+
+        fn run(data: Rows<Self::Data>) -> TransformResult {
+            for (w, p) in data {
+                
+            }
+            Ok(TransformSuccess)
+        }
+    }
+    
     #[test]
     fn vehicle_example() {
         let mut db = EntityDatabase::new();
         db.register_component_debug_info::<Chassis>();
         db.register_component_debug_info::<Engine>();
-
+        
         let v8_engine = Engine { power: 400, torque: 190, rpm: 5600, throttle: 0.0 };
         let diesel_engine = Engine { power: 300, torque: 650, rpm: 3200, throttle: 0.0 };
 

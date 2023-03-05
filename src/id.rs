@@ -37,7 +37,7 @@ pub(crate) struct ComponentId(pub(crate) IdUnion);
 /// 
 /// These are functionally the same as `EntityId`'s
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub(crate) struct FamilyId(pub(crate) IdUnion);
+pub struct FamilyId(pub(crate) IdUnion);
 
 /// A stable `TypeId` which (should) be common across builds. This isn't a guarantee, especially
 /// across different rust versions. Used to generate better errors

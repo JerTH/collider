@@ -23,6 +23,13 @@ pub(crate) enum ComponentDelta {
 #[derive(Clone, Default, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct ComponentTypeSet(pub(crate) Arc<BTreeSet<ComponentType>>);
 
+
+/// Tracks all components that have been seen
+#[derive(Default, Clone, Debug)]
+pub(crate) struct ComponentRegistry {
+    seen: Vec<ComponentType>,
+}
+
 // Impl's
 
 // `Component` trait
@@ -71,5 +78,32 @@ impl Deref for ComponentTypeSet {
 
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+impl ComponentRegistry {
+    pub fn new() -> Self {
+        ComponentRegistry {
+            seen: Vec::with_capacity(2^8usize) // reasonable alloc size but can grow if needed
+        }
+    }
+
+    /// Checks if the given component type is known by this registery
+    /// Returns `true` if it is, `false` if it is not
+    pub fn seen<T: Component>(&self) -> bool {
+        let val = ComponentType::of::<T>();
+        self.seen_val(&val)
+    }
+
+    pub fn seen_val(&self, val: &ComponentType) -> bool {
+        self.seen.binary_search(&val).is_ok()
+    }
+
+    /// Registers the component
+    pub fn register<T: Component>(&mut self) {
+        let val = ComponentType::of::<T>();
+        StableTypeId::register_debug_info::<T>();
+        self.seen.push(val);
+        self.seen.sort();
     }
 }
