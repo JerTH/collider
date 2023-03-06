@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::collections::HashSet;
 use std::ops::DerefMut;
 use std::ops::Deref;
 use std::sync::Mutex;
@@ -349,7 +350,6 @@ impl EntityDatabase {
     /// Registers a set of components as a `Family`
     fn register_family(&mut self, set: ComponentTypeSet) -> FamilyId {
         let id: FamilyId = self.alloc.alloc().into();
-
         
         self.data.tables
         .entry(id)
@@ -387,8 +387,17 @@ impl EntityDatabase {
         Write::new()
     }
 
-    pub(crate) fn sub_families(&self, set: ComponentTypeSet) -> Option<SubFamilies> {
-        self.records.sub_families.get(&set).cloned()
+    pub(crate) fn sub_families(&self, set: ComponentTypeSet) -> SubFamilies {
+        // TODO: Cache results
+        
+        let mut res = HashSet::new();
+
+        for (s, id) in self.records.component_sets.iter() {
+            if set.is_subset(s) {
+                res.insert(*id);
+            }
+        }
+        SubFamilies::from(res)
     }
 }
 

@@ -54,7 +54,7 @@ impl<'a, T> Runs for T
 {
     fn run_on(&mut self, db: &EntityDatabase) -> TransformResult
     {
-        let rows = T::Data::as_row::<T::Data>();
+        let rows = T::Data::as_rows::<T::Data>(db);
         T::run(rows)
     }
 }
@@ -154,7 +154,7 @@ pub trait Selection {
     fn rw_set() -> RwSet;
     fn arity() -> usize;
     fn make(db: &EntityDatabase) -> Self;
-    fn as_row<'a, T>() -> Rows<'a, T>;
+    fn as_rows<'db, T>(db: &'db EntityDatabase) -> Rows<'db, T>;
 }
 
 
@@ -311,26 +311,27 @@ pub struct RowIter<'a, T: ImplRow<'a>> {
     db: &'a EntityDatabase,
     next_entity: Option<EntityId>,
     table_guard: Option<DataTableGuard<'a>>,
-    columns_iter: Option<T>, // TODO: Probably need some weird transmogrifying through traits
+    //columns_iter: Option<T>, // TODO: Probably need some weird transmogrifying through traits
     family_iter: <SubFamilies as IntoIterator>::IntoIter,
+    //sub_families: SubFamilies,
     _p: PhantomData<T>,
 }
 
 
 
-impl<'a, T: ImplRow<'a>> RowIter<'a, T> {
-    fn new(db: &'a EntityDatabase, sub_families: SubFamilies) -> Self {
-        let sub_family_iter = sub_families.into_iter();
-        RowIter {
-            db,
-            next_entity: None,
-            table_guard: None,
-            columns_iter: todo!("columns_iter in ImplRow RowIter"),
-            family_iter: sub_family_iter,
-            _p: PhantomData::default()
-        }
-    }
-}
+//impl<'a, T: ImplRow<'a>> RowIter<'a, T> {
+//    fn new(db: &'a EntityDatabase, sub_families: SubFamilies) -> Self {
+//        //let sub_family_iter = sub_families.into_iter();
+//        RowIter {
+//            db,
+//            next_entity: None,
+//            table_guard: None,
+//            //columns_iter: todo!("columns_iter in ImplRow RowIter"),
+//            sub_families: sub_families,
+//            _p: PhantomData::default()
+//        }
+//    }
+//}
 
 
 
@@ -413,17 +414,19 @@ macro_rules! impl_tdata_tuple {
             {
                 ($($t::select_one(&db),)+)
             }
+            
+            fn as_rows<'db, T>(db: &'db EntityDatabase) -> Rows<'db, T> {
+                let i = [
+                    $(
+                        $t::component_type()
+                    ),+
+                ].into_iter();
 
-            fn as_row<'b, T>(db: &EntityDatabase) -> Rows<'b, T> {
-                todo!("as_rows")
+                let set = ComponentTypeSet::from_iter(i);
+                
                 Rows {
                     db,
-                    sub_families: db.sub_families() /**
-                    
-
-********continue here, complete as_row and then chase todo!()'s
-
-                     */
+                    sub_families: db.sub_families(set),
                     _p: PhantomData::default(),
                 }
             }
@@ -445,8 +448,8 @@ macro_rules! impl_tdata_tuple {
                     ),+
                 ].into_iter();
                 let set = ComponentTypeSet::from_iter(i);
-
-                let sf: crate::family::SubFamilies = db.sub_families(set).expect("expected sub families");
+                
+                let sf: crate::family::SubFamilies = db.sub_families(set);
                 ($(
                     $t::iterate_with(db, sf.clone()),
                 )+)
@@ -472,7 +475,7 @@ macro_rules! impl_tdata_tuple {
                                 $t::as_ref_type(
                                     guard.get_mut(&component!($t::Type))?
                                          .data.downcast_mut::<ComponentColumn<$t::Type>>()?
-                                         .get_mut(&self.next_entity.unwrap()).unwrap()
+                                         .get_mut(&self.next_entity?)?
                                 )
                             ,)+
                         );
@@ -520,14 +523,15 @@ macro_rules! impl_tdata_tuple {
             fn into_iter(self) -> Self::IntoIter {
                 let next_entity = None;
                 let table_guard = None;
-                let family_iter = self.sub_families.into_iter();
-                let columns_iter = todo!("let columns iter");
+                let sub_families = self.sub_families.clone();
+                let family_iter = sub_families.into_iter();
+                //let columns_iter = todo!("let columns iter");
 
                 RowIter {
                     db: self.db,
                     next_entity,
                     table_guard,
-                    columns_iter,
+                    //columns_iter,
                     family_iter,
                     _p: PhantomData::default(),
                 }

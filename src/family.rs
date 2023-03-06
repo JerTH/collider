@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::collections::HashSet;
+use std::ops::AddAssign;
 use std::ops::Deref;
 use std::collections::HashMap;
 use std::ops::DerefMut;
@@ -67,7 +68,12 @@ pub(crate) struct FamilyGraphEdge {
 }
 
 #[derive(Default, Clone, PartialEq, Eq, Debug)]
-pub struct SubFamilies(Arc<HashSet<FamilyId>>);
+pub struct SubFamilies(Arc<Vec<FamilyId>>);
+
+pub struct SubFamiliesIter {
+    data: SubFamilies,
+    next: usize,
+}
 
 /// Maps component type sets to lists of families where
 /// the family contains at least the components in the type set
@@ -159,10 +165,32 @@ impl DerefMut for EntityFamilyMap {
 impl IntoIterator for SubFamilies {
     type Item = FamilyId;
 
-    type IntoIter = <HashSet<FamilyId> as IntoIterator>::IntoIter;
+    type IntoIter = SubFamiliesIter;
 
     fn into_iter(self) -> Self::IntoIter {
-        todo!()
+        SubFamiliesIter {
+            data: self.clone(),
+            next: 0,
+        }
+    }
+}
+
+impl Deref for SubFamilies {
+    type Target = Vec<FamilyId>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+//impl SubFamilies {
+//    fn iter(&self) -> std::collections::hash_set::Iter<FamilyId> {
+//        self.0.as_ref().into_iter()
+//    }
+//}
+
+impl From<HashSet<FamilyId>> for SubFamilies {
+    fn from(value: HashSet<FamilyId>) -> Self {
+        SubFamilies(Arc::new(value.into_iter().collect()))
     }
 }
 
@@ -172,11 +200,20 @@ impl Deref for SubFamilyMap {
     fn deref(&self) -> &Self::Target {
         &self.0
     }
-
 }
 
 impl DerefMut for SubFamilyMap {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
+    }
+}
+
+// `SubFamiliesIter`
+impl Iterator for SubFamiliesIter {
+    type Item = FamilyId;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next.add_assign(1);
+        self.data.get(self.next - 1).cloned()
     }
 }
