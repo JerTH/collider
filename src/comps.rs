@@ -1,5 +1,5 @@
 use std::any::Any;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fmt::Debug;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -27,7 +27,7 @@ pub(crate) struct ComponentTypeSet(pub(crate) Arc<BTreeSet<ComponentType>>);
 /// Tracks all components that have been seen
 #[derive(Default, Clone, Debug)]
 pub(crate) struct ComponentRegistry {
-    seen: Vec<ComponentType>,
+    seen: HashSet<ComponentType>, // think about replacing with more sophisticated device 
 }
 
 // Impl's
@@ -84,7 +84,7 @@ impl Deref for ComponentTypeSet {
 impl ComponentRegistry {
     pub fn new() -> Self {
         ComponentRegistry {
-            seen: Vec::with_capacity(2^8usize) // reasonable alloc size but can grow if needed
+            seen: HashSet::with_capacity(2^8usize) // reasonable initial capacity
         }
     }
 
@@ -96,14 +96,13 @@ impl ComponentRegistry {
     }
 
     pub fn seen_val(&self, val: &ComponentType) -> bool {
-        self.seen.binary_search(&val).is_ok()
+        self.seen.contains(val)
     }
 
     /// Registers the component
     pub fn register<T: Component>(&mut self) {
         let val = ComponentType::of::<T>();
         StableTypeId::register_debug_info::<T>();
-        self.seen.push(val);
-        self.seen.sort();
+        self.seen.insert(val);
     }
 }

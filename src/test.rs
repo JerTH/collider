@@ -110,7 +110,7 @@ mod vehicle_example {
 
         fn run(data: Rows<Self::Data>) -> Result<TransformSuccess, TransformError> {
             for (p, t, e) in data {
-
+                
             }
 
             Ok(TransformSuccess)

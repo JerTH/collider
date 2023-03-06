@@ -136,18 +136,13 @@ impl<'a, T> Metadata for Write<T> where T: Component {
 
 
 pub trait SelectOne<'a> {
+    type Type;
     type Ref;
-    
     type Iterator;
     
     fn select_one(db: &EntityDatabase) -> Self;
-    
     fn iterate_with(db: &'a EntityDatabase, sub_families: SubFamilies) -> Self::Iterator;
-    
-    fn as_ref_type(&mut self) -> Self::Ref    {
-        //self.into()
-        todo!()
-    }
+    fn as_ref_type(this: &mut Self::Type) -> Self::Ref;
 }
 
 
@@ -184,6 +179,12 @@ pub struct Rows<'a, T> {
 
 
 
+trait RwData {
+    type Inner;
+}
+
+
+
 #[derive(Default)]
 pub struct Read<T: Component> {
     _p: PhantomData<T>,
@@ -199,13 +200,19 @@ impl<T: Component> Read<T> {
     }
 }
 
-
+//impl<C> RwData for Read<C>
+//    where
+//        C: Component
+//{
+//    type Inner = C;
+//}
 
 impl<'a, C> SelectOne<'a> for Read<C>
     where 
         Self: 'a,
         C: Component,
 {
+    type Type = C;
     type Ref = &'a C;
     type Iterator = ReadIter<'a, C>;
 
@@ -220,6 +227,10 @@ impl<'a, C> SelectOne<'a> for Read<C>
             _p: PhantomData::default(),
         }
     }
+
+    fn as_ref_type(this: &mut Self::Type) -> Self::Ref {
+        todo!()
+    }
 }
 
 
@@ -229,8 +240,6 @@ pub struct Write<T: Component> {
     _p: PhantomData<T>,
 }
 
-
-
 impl<T: Component> Write<T> {
     pub(crate) fn new() -> Self {
         Self {
@@ -239,15 +248,20 @@ impl<T: Component> Write<T> {
     }
 }
 
-
+//impl<C> RwData for Write<C>
+//    where
+//        C: Component
+//{
+//    type Inner = C;
+//}
 
 impl<'a, C> SelectOne<'a> for Write<C>
     where
         Self: 'a,
         C: Component,
 {
+    type Type = C;
     type Ref = &'a mut C;
-
     type Iterator = WriteIter<'a, C>;
 
     fn select_one(db: &EntityDatabase) -> Self {
@@ -260,6 +274,10 @@ impl<'a, C> SelectOne<'a> for Write<C>
             sub_families,
             _p: PhantomData::default(),
         }
+    }
+
+    fn as_ref_type(this: &mut Self::Type) -> Self::Ref {
+        todo!("as_ref_type")
     }
 }
 
@@ -295,7 +313,7 @@ pub struct RowIter<'a, T: ImplRow<'a>> {
     table_guard: Option<DataTableGuard<'a>>,
     columns_iter: Option<T>, // TODO: Probably need some weird transmogrifying through traits
     family_iter: <SubFamilies as IntoIterator>::IntoIter,
-    _p: PhantomData<&'a T>
+    _p: PhantomData<T>,
 }
 
 
@@ -307,7 +325,7 @@ impl<'a, T: ImplRow<'a>> RowIter<'a, T> {
             db,
             next_entity: None,
             table_guard: None,
-            columns_iter: todo!(),
+            columns_iter: todo!("columns_iter in ImplRow RowIter"),
             family_iter: sub_family_iter,
             _p: PhantomData::default()
         }
@@ -347,14 +365,18 @@ impl RwSet {
 }
 
 
-/// Here be macro dragons
-/// 
-/// These macros are what make selections possible and ergonomic. They
-/// expand into implementations for arbitrary user defined tuple
-/// combinations which represent concrete selections into the database
-/// With a large amount of components or selection kinds, this will incur
-/// some compilation overhead, the trade-off however is that database
-/// access is fast and predictable
+
+// Here we abuse the type system and macros until we get what we want
+// 
+// These macros are what make selections possible and ergonomic. They
+// expand into implementations for arbitrary user defined tuple
+// combinations which represent concrete selections into the database
+// With a large amount of components or selection kinds, this will incur
+// some compilation overhead, the trade-off however is that database
+// access is fast and predictable
+//
+// Right now this code is horribly unmaintainable. It is a means to an
+// end and could use a major uplift
 macro_rules! impl_tdata_tuple {
     ($($t:tt),+) => {
         impl<'a, $($t,)+> Selection for ($($t,)+)
@@ -392,8 +414,18 @@ macro_rules! impl_tdata_tuple {
                 ($($t::select_one(&db),)+)
             }
 
-            fn as_row<'b, T>() -> Rows<'b, T> {
-                todo!()
+            fn as_row<'b, T>(db: &EntityDatabase) -> Rows<'b, T> {
+                todo!("as_rows")
+                Rows {
+                    db,
+                    sub_families: db.sub_families() /**
+                    
+
+********continue here, complete as_row and then chase todo!()'s
+
+                     */
+                    _p: PhantomData::default(),
+                }
             }
         }
         
@@ -402,6 +434,7 @@ macro_rules! impl_tdata_tuple {
                 ($($t,)+): Selection,
                 $($t: Metadata,)+
                 $($t: SelectOne<'a>,)+
+                $(<$t as SelectOne<'a>>::Type: Component,)+
         {
             type IteratorTuple = ($($t::Iterator,)+);
             
@@ -424,8 +457,7 @@ macro_rules! impl_tdata_tuple {
             where
                 $($t: Metadata,)+
                 $($t: SelectOne<'a>,)+
-                $($t: Component,)+
-                //($($t,)+): ImplRow<'a>,
+                $(<$t as SelectOne<'a>>::Type: Component,)+
         {
             type Item = ($($t::Ref,)+);
             
@@ -437,14 +469,15 @@ macro_rules! impl_tdata_tuple {
                         // build the row here
                         let row = (
                             $(
-                                guard.get_mut(&component!($t))?
-                                     .data.downcast_mut::<ComponentColumn<$t>>()?
-                                     .get_mut(&self.next_entity?)?
-                                     .as_ref_type()
+                                $t::as_ref_type(
+                                    guard.get_mut(&component!($t::Type))?
+                                         .data.downcast_mut::<ComponentColumn<$t::Type>>()?
+                                         .get_mut(&self.next_entity.unwrap()).unwrap()
+                                )
                             ,)+
                         );
                         // set the next entity
-
+                        
                         return Some(row)
                     } else {
                         // we don't have a locked table, do we have a next family?
@@ -477,19 +510,18 @@ macro_rules! impl_tdata_tuple {
             where
                 $($t: Metadata,)+
                 $($t: SelectOne<'a>,)+
-                $($t: Component,)+
-                //($($t,)+): ImplRow<'a>,
+                $(<$t as SelectOne<'a>>::Type: Component,)+
+                ($($t,)+): ImplRow<'a>,
                 $($t: 'a,)+
         {
             type Item = ($($t::Ref,)+);
-
             type IntoIter = RowIter<'a, ($($t,)+)>;
 
             fn into_iter(self) -> Self::IntoIter {
                 let next_entity = None;
                 let table_guard = None;
                 let family_iter = self.sub_families.into_iter();
-                let columns_iter = todo!();
+                let columns_iter = todo!("let columns iter");
 
                 RowIter {
                     db: self.db,
