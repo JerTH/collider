@@ -109,8 +109,10 @@ mod vehicle_example {
         type Data = (Read<Physics>, Write<Transmission>, Write<Engine>);
 
         fn run(data: Rows<Self::Data>) -> Result<TransformSuccess, TransformError> {
+            println!("running drive transformation");
+            
             for (p, t, e) in data {
-                
+                println!("driving");
             }
 
             Ok(TransformSuccess)
@@ -131,6 +133,8 @@ mod vehicle_example {
     
     #[test]
     fn vehicle_example() {
+        std::env::set_var("RUST_BACKTRACE", "1");
+        
         let mut db = EntityDatabase::new();
         db.register_component_debug_info::<Chassis>();
         db.register_component_debug_info::<Engine>();
@@ -150,7 +154,7 @@ mod vehicle_example {
             gears: vec![4.69, 2.98, 2.14, 1.76, 1.52, 1.27, 1.00, 0.85, 0.68, 0.63],
             current: None,
         };
-
+        
         let sports_car = db.create();
         db.add_component(sports_car, v8_engine).unwrap();
         db.add_component(sports_car, five_speed).unwrap();
@@ -170,7 +174,7 @@ mod vehicle_example {
 
         phase_one.run_on(&db).unwrap();
 
-        dbg!(&db);
+        //dbg!(&db);
     }
 
 }

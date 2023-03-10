@@ -1,7 +1,11 @@
 use std::any::TypeId;
+use std::cell::RefMut;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::marker::PhantomData;
+
+use ouroboros::self_referencing;
 
 use crate::EntityId;
 use crate::db::DataTableGuard;
@@ -11,6 +15,7 @@ use crate::comps::Component;
 use crate::comps::ComponentType;
 use crate::comps::ComponentTypeSet;
 use crate::family::SubFamilies;
+use crate::family::SubFamiliesIter;
 use crate::family::SubFamilyMap;
 use crate::id::FamilyId;
 
@@ -142,7 +147,7 @@ pub trait SelectOne<'a> {
     
     fn select_one(db: &EntityDatabase) -> Self;
     fn iterate_with(db: &'a EntityDatabase, sub_families: SubFamilies) -> Self::Iterator;
-    fn as_ref_type(this: &mut Self::Type) -> Self::Ref;
+    fn as_ref_type(this: &'a mut Self::Type) -> Self::Ref;
 }
 
 
@@ -228,8 +233,8 @@ impl<'a, C> SelectOne<'a> for Read<C>
         }
     }
 
-    fn as_ref_type(this: &mut Self::Type) -> Self::Ref {
-        todo!()
+    fn as_ref_type(this: &'a mut Self::Type) -> Self::Ref {
+        &*this
     }
 }
 
@@ -276,8 +281,8 @@ impl<'a, C> SelectOne<'a> for Write<C>
         }
     }
 
-    fn as_ref_type(this: &mut Self::Type) -> Self::Ref {
-        todo!("as_ref_type")
+    fn as_ref_type(this: &'a mut Self::Type) -> Self::Ref {
+        this
     }
 }
 
@@ -303,19 +308,6 @@ pub struct WriteIter<'a, T: Component> {
     _p: PhantomData<T>,
 }
 
-
-
-/// A special iterator which traverses rows of the
-/// database which match a selection
-pub struct RowIter<'a, T: ImplRow<'a>> {
-    db: &'a EntityDatabase,
-    next_entity: Option<EntityId>,
-    table_guard: Option<DataTableGuard<'a>>,
-    //columns_iter: Option<T>, // TODO: Probably need some weird transmogrifying through traits
-    family_iter: <SubFamilies as IntoIterator>::IntoIter,
-    //sub_families: SubFamilies,
-    _p: PhantomData<T>,
-}
 
 
 
@@ -365,8 +357,6 @@ impl RwSet {
     }
 }
 
-
-
 // Here we abuse the type system and macros until we get what we want
 // 
 // These macros are what make selections possible and ergonomic. They
@@ -379,7 +369,7 @@ impl RwSet {
 // Right now this code is horribly unmaintainable. It is a means to an
 // end and could use a major uplift
 macro_rules! impl_tdata_tuple {
-    ($($t:tt),+) => {
+    ($([$t:ident, $i:tt]),+) => {
         impl<'a, $($t,)+> Selection for ($($t,)+)
             where
                 $($t: Metadata,)+
@@ -455,8 +445,8 @@ macro_rules! impl_tdata_tuple {
                 )+)
             }
         }
-
-        impl<'a, $($t,)+> Iterator for RowIter<'a, ($($t,)+)>
+        
+        impl<'a, $($t,)+> Iterator for RowIter<'a, ($($t,)+), ($(ColumnRefMut<'a, $t::Type>,)+)>
             where
                 $($t: Metadata,)+
                 $($t: SelectOne<'a>,)+
@@ -465,46 +455,21 @@ macro_rules! impl_tdata_tuple {
             type Item = ($($t::Ref,)+);
             
             fn next(&mut self) -> Option<Self::Item> {
-                // just make it work even if it's slow for now
-                loop {
-                    if let Some(guard) = self.table_guard.as_mut() {
-                        // we have a locked table
-                        // build the row here
-                        let row = (
-                            $(
-                                $t::as_ref_type(
-                                    guard.get_mut(&component!($t::Type))?
-                                         .data.downcast_mut::<ComponentColumn<$t::Type>>()?
-                                         .get_mut(&self.next_entity?)?
-                                )
-                            ,)+
-                        );
-                        // set the next entity
-                        
-                        return Some(row)
-                    } else {
-                        // we don't have a locked table, do we have a next family?
-                        match self.family_iter.next() {
-                            Some(family_id) => {
-                                // spin until we acquire the data table we're interested in
-                                // there are much better ways of doing these worth exploring
-                                // but this works for now
-                                loop {
-                                    if let Some(guard) = self.db.try_lock_family_table(&family_id) {
-                                        self.table_guard = Some(guard);
-                                        break;
-                                    } else {
-                                        std::thread::yield_now();
-                                    }
-                                }
-                            },
-                            None => {
-                                // no table and no next family - iteration is finished
-                                return None;
-                            }
-                        }
-                    }
-                }
+                let guard = self.table_guard.as_mut().unwrap();
+
+                let columns = ($(
+                    guard.get(&component!($t::Type)).unwrap()
+                ,)+);
+
+                let real = ($(
+                    columns.$i.data.downcast_ref::<ComponentColumn<$t::Type>>()
+                ,)+);
+
+                let column_refs = ($(
+                    real.$i.unwrap().get_mut()
+                ,)+);
+                
+                todo!()
             }
         }
         
@@ -515,45 +480,86 @@ macro_rules! impl_tdata_tuple {
                 $($t: SelectOne<'a>,)+
                 $(<$t as SelectOne<'a>>::Type: Component,)+
                 ($($t,)+): ImplRow<'a>,
-                $($t: 'a,)+
+                $($t: 'static,)+
         {
             type Item = ($($t::Ref,)+);
-            type IntoIter = RowIter<'a, ($($t,)+)>;
-
+            type IntoIter = RowIter<'a, ($($t,)+), ($(ColumnRefMut<'a, $t::Type>,)+)>;
+            
             fn into_iter(self) -> Self::IntoIter {
-                let next_entity = None;
-                let table_guard = None;
                 let sub_families = self.sub_families.clone();
-                let family_iter = sub_families.into_iter();
-                //let columns_iter = todo!("let columns iter");
+                let mut family_iter = sub_families.into_iter();
+
+                let first = family_iter.next().unwrap();
+                let guard;
+                loop {
+                    println!("trying to acquire family table");
+                    match self.db.try_lock_family_table(&first) {
+                        Some(g) => { guard = g; break; },
+                        None => { std::hint::spin_loop(); continue; },
+                    }
+                };
 
                 RowIter {
                     db: self.db,
-                    next_entity,
-                    table_guard,
-                    //columns_iter,
-                    family_iter,
-                    _p: PhantomData::default(),
+                    family_iter: Some(family_iter),
+                    table_guard: Some(guard),
+                    column_refs: None,
+                    _t: PhantomData::default(),
+                    _i: PhantomData::default(),
                 }
             }
         }
     };
 }
 
+type ColumnRefMut<'a, T> = RefMut<'a, HashMap<EntityId, T>>;
+
+/// A special iterator which traverses rows of the
+/// database which match a selection
+pub struct RowIter<'a, T, I> {
+    db: &'a EntityDatabase,
+    family_iter: Option<SubFamiliesIter>,
+    table_guard: Option<DataTableGuard<'a>>,
+    column_refs: Option<I>,
+    _t: PhantomData<T>,
+    _i: PhantomData<I>,
+}
+
 macro_rules! one {
     ($t:tt) => { 1usize };
 }
 
-impl_tdata_tuple!(A);
-impl_tdata_tuple!(A, B);
-impl_tdata_tuple!(A, B, C);
-impl_tdata_tuple!(A, B, C, D);
-impl_tdata_tuple!(A, B, C, D, E);
-impl_tdata_tuple!(A, B, C, D, E, F);
-impl_tdata_tuple!(A, B, C, D, E, F, G);
-impl_tdata_tuple!(A, B, C, D, E, F, G, H);
-impl_tdata_tuple!(A, B, C, D, E, F, G, H, I);
-impl_tdata_tuple!(A, B, C, D, E, F, G, H, I, J);
-impl_tdata_tuple!(A, B, C, D, E, F, G, H, I, J, K);
-impl_tdata_tuple!(A, B, C, D, E, F, G, H, I, J, K, L);
+/*
+ *  let columns = ($(
+        table_guard.as_ref().unwrap().get(&component!($t::Type)).unwrap()
+    ,)+);
+    
+    println!("{columns:#?}");
+    
+    let real = ($(
+        columns.$i.data.downcast_ref::<ComponentColumn<$t::Type>>()
+    ,)+);
+    
+    println!("{real:#?}");
+    
+    let column_refs = ($(
+        real.$i.unwrap().get_mut()
+    ,)+);
+    
+    println!("{column_refs:#?}");
+ */
+
+impl_tdata_tuple!([A, 0]);
+impl_tdata_tuple!([A, 0], [B, 1]);
+impl_tdata_tuple!([A, 0], [B, 1], [C, 2]);
+//impl_tdata_tuple!(A, B, C);
+//impl_tdata_tuple!(A, B, C, D);
+//impl_tdata_tuple!(A, B, C, D, E);
+//impl_tdata_tuple!(A, B, C, D, E, F);
+//impl_tdata_tuple!(A, B, C, D, E, F, G);
+//impl_tdata_tuple!(A, B, C, D, E, F, G, H);
+//impl_tdata_tuple!(A, B, C, D, E, F, G, H, I);
+//impl_tdata_tuple!(A, B, C, D, E, F, G, H, I, J);
+//impl_tdata_tuple!(A, B, C, D, E, F, G, H, I, J, K);
+//impl_tdata_tuple!(A, B, C, D, E, F, G, H, I, J, K, L);
 

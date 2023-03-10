@@ -1,4 +1,7 @@
 use std::any::Any;
+use std::borrow::Borrow;
+use std::cell::RefCell;
+use std::cell::RefMut;
 use std::collections::HashSet;
 use std::ops::DerefMut;
 use std::ops::Deref;
@@ -61,12 +64,13 @@ struct EntityAllocator {
     free: Vec<EntityId>,
 }
 
+type ColumnData<T> = Vec<T>;
+
 /// A `ComponentColumn<T>` is the raw typed storage for a single component type in a `DataTable`
 /// 
 /// Columns are indexed by `ComponentType`'s, and rows are indexed by `EntityId`'s
-#[derive(Default)]
-pub(crate) struct ComponentColumn<T: Component>(pub HashMap<EntityId, T>);
-
+#[derive(Debug, Default)]
+pub(crate) struct ComponentColumn<T: Component>(RefCell<HashMap<EntityId, T>>);
 
 /// Stores raw component data of a single type, describes how to interact with that data
 pub struct ComponentColumnEntry {
@@ -116,7 +120,9 @@ pub(crate) struct DataTableGuard<'a>(MutexGuard<'a, TableEntry>);
 /// E31 [&'1]  [ 0 ]
 ///  
 #[derive(Default, Debug)]
-struct DataTable(Arc<Mutex<TableEntry>>);
+struct DataTable {
+    table: Arc<Mutex<TableEntry>>
+}
 
 // Impl's
 
@@ -153,6 +159,7 @@ impl EntityDatabase {
 
     pub(crate) fn try_lock_family_table(&self, family_id: &FamilyId) -> Option<DataTableGuard> {
         self.data.tables.get(&family_id)?
+            .table
             .try_lock().ok()
             .map(|guard| DataTableGuard(guard))
     }
@@ -239,7 +246,7 @@ impl EntityDatabase {
                 let column_entry = occupied.get_mut();
                 match column_entry.data.downcast_mut::<ComponentColumn<T>>() {
                     Some(column) => {
-                        column.insert(*entity, component);
+                        column.insert(entity, component);
                     },
                     None => {
                         panic!("mismatched column type");
@@ -247,7 +254,10 @@ impl EntityDatabase {
                 }
             },
             Entry::Vacant(vacant) => {
-                let column = ComponentColumn::<T>::from((*entity, component));
+                let column = ComponentColumn::new();
+                
+                column.insert(entity, component);
+
                 let column_entry = ComponentColumnEntry {
                     data: Box::new(column),
                     mvfn: ComponentColumn::<T>::fn_virtual_move,
@@ -270,17 +280,28 @@ impl EntityDatabase {
     fn lock_tables_yielding<'a, 'b>(&self, a: &'a DataTable, b: &'b DataTable) -> (DataTableGuard<'a>, DataTableGuard<'b>) {
         loop {
             let ga = a.lock();
-            match b.try_lock() {
+            match b.table.try_lock() {
                 Ok(gb) => {
                     return (ga, DataTableGuard(gb))
                 },
                 Err(err) => {
-                    std::mem::drop(ga)
+                    match err {
+                        std::sync::TryLockError::Poisoned(_) => {
+                            panic!("tried to lock a data table from a poisoned thread");
+                        },
+                        std::sync::TryLockError::WouldBlock => {
+                            // Someone else has one of the tables we need
+                            // To mitigate deadlocks we will give up our locks
+                            // and yield the thread before we try again
+                            std::mem::drop(ga);
+                            std::thread::yield_now();
+                        },
+                    }
                 },
             }
         }
     }
-
+    
     fn resolve_transform<T: Component>(&mut self, entity: EntityId, component: T, transform: FamilyTransform) -> Result<(), ()> {
         let dest_family = match transform {
             // the entity is being transfered from one family to another
@@ -375,15 +396,15 @@ impl EntityDatabase {
     /// The selection only includes components of entities which hold all of the
     /// selected components, e.g. the family or sub-families derived from the list
     /// of components selected
-    pub fn select<T: Selection>(&self) -> T {
+    pub(crate) fn select<T: Selection>(&self) -> T {
         T::make(&self)
     }
     
-    pub fn select_read<T>(&self) -> Read<T> where T: Component {
+    pub(crate) fn select_read<T>(&self) -> Read<T> where T: Component {
         Read::new()
     }
 
-    pub fn select_write<T>(&self) -> Write<T> where T: Component {
+    pub(crate) fn select_write<T>(&self) -> Write<T> where T: Component {
         Write::new()
     }
 
@@ -444,40 +465,53 @@ impl EntityAllocator {
 
 // `ComponentColumn`
 impl<T: Component> ComponentColumn<T> {
-    fn new() -> Self {
+    pub fn new() -> Self {
         ComponentColumn(Default::default())
     }
 
-    fn fn_virtual_move(row: &EntityId, from: &mut Box<dyn Any>, to: &mut Box<dyn Any>) {
+    pub fn insert(&self, entity: &EntityId, component: T) -> Option<T> {
+        self.0.borrow_mut().insert(*entity, component)
+    }
+
+    pub fn remove(&self, entity: &EntityId) -> Option<T> {
+        self.0.borrow_mut().remove(entity)
+    }
+
+    pub fn get_mut(&self) -> RefMut<HashMap<EntityId, T>> {
+        self.0.borrow_mut()
+    }
+
+    fn fn_virtual_move(entity: &EntityId, from: &mut Box<dyn Any>, to: &mut Box<dyn Any>) {
         let from = from.downcast_mut::<ComponentColumn<T>>().expect("expect from");
         let dest = to.downcast_mut::<ComponentColumn<T>>().expect("expect dest");
-        match from.remove(row) {
-            Some(item) => { dest.insert(*row, item); },
+        match from.remove(entity) {
+            Some(item) => { dest.insert(entity, item); },
             None => { #[cfg(Debug)] println!("no row value to move"); },
         }
     }
-
+    
     fn fn_virtual_ctor() -> Box<dyn Any> {
         Box::new(ComponentColumn::<T>::new())
     }
 }
 
-impl<T: Component> From<(EntityId, T)> for ComponentColumn<T> {
-    fn from(value: (EntityId, T)) -> Self {
-        let mut column = ComponentColumn::new();
-        column.insert(value.0, value.1);
-        column
-    }
-}
+//impl<T: Component> From<(EntityId, T)> for ComponentColumn<T> {
+//    fn from(value: (EntityId, T)) -> Self {
+//        let mut column = ComponentColumn::new();
+//        column.insert(value.0, value.1);
+//        column
+//    }
+//}
 
-impl<T: Component> Debug for ComponentColumn<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ComponentColumn").field("data", &self).finish()
-    }
-}
+//impl<T: Component> Debug for ComponentColumn<T> {
+//    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//        //f.debug_struct("ComponentColumn").field("data", &self).finish()
+//        write!(f, "ComponentColumns<{}>", )
+//    }
+//}
 
 impl<T: Component> Deref for ComponentColumn<T> {
-    type Target = HashMap<EntityId, T>;
+    type Target = RefCell<HashMap<EntityId, T>>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -494,7 +528,7 @@ impl<T: Component> DerefMut for ComponentColumn<T> {
 impl ComponentColumnEntry {
     fn insert<T: Component>(&mut self, key: EntityId, val: T) -> Option<T> {
         let column = self.data.downcast_mut::<ComponentColumn<T>>().unwrap();
-        column.insert(key, val)
+        column.borrow_mut().insert(key, val)
     }
 
     fn move_row_val(&mut self, row: &EntityId, dest: &mut Self) {
@@ -561,24 +595,9 @@ impl<'a> DerefMut for DataTableGuard<'a> {
 // `DataTable`
 impl DataTable {
     fn lock(&self) -> DataTableGuard {
-        match self.0.lock() {
+        match self.table.lock() {
             Ok(guard) => DataTableGuard(guard),
             Err(err) => panic!("poisoned, unable to lock data table for reading: {}", err),
         }
     }
 }
-
-impl Deref for DataTable {
-    type Target = Arc<Mutex<TableEntry>>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for DataTable {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
