@@ -14,6 +14,8 @@ pub(crate) mod comps;
 pub(crate) mod family;
 pub(crate) mod xform;
 
+pub(crate) mod database; // replaces db
+
 #[cfg(test)] mod test;
 
 pub use db::EntityDatabase;
