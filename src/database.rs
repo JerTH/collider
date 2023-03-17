@@ -336,7 +336,7 @@ pub mod reckoning {
         ptr: Arc<BTreeSet<CType>>, // thread-local?
     }
     
-    #[derive(Clone)]
+    #[derive(Clone, Default)]
     pub struct FamilyIdSet {
         ptr: Arc<Vec<FamilyId>>, // thread-local?
     }
@@ -410,10 +410,8 @@ pub mod reckoning {
     } // transfer ======================================================================
 
     pub mod conflict {
-        use std::{collections::{HashSet, HashMap}, cell::{Cell, RefCell}, marker::PhantomData, ops::{Deref, DerefMut}};
+        use std::{collections::{HashSet, HashMap, btree_map::Values, hash_map::IntoValues}, cell::{Cell, RefCell}, marker::PhantomData, ops::{Deref, DerefMut}};
 
-        use crate::database::reckoning::Command;
-        
         pub trait Dependent {
             type Dependency: PartialEq + Eq + std::hash::Hash;
             fn dependencies(&self) -> impl Iterator<Item = Self::Dependency>;
@@ -425,7 +423,7 @@ pub mod reckoning {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub struct ConflictColor(usize);
         impl ConflictColor {
-            fn as_index(&self) -> usize {
+            fn as_usize(&self) -> usize {
                 self.0
             }
         }
@@ -448,6 +446,7 @@ pub mod reckoning {
                 Self(Vec::new())
             }
         }
+
         impl<K, V, D> Deref for Init<K, V, D> {
             type Target = Vec<ConflictGraphNode<K, V, D>>;
 
@@ -455,15 +454,18 @@ pub mod reckoning {
                 &self.0
             }
         }
+
         impl<K, V, D> DerefMut for Init<K, V, D> {
             fn deref_mut(&mut self) -> &mut Self::Target {
                 &mut self.0
             }
         }
 
+        type Buckets<K, V> = HashMap<usize, Vec<(K, V)>>;
+
         #[derive(Debug)]
         pub struct Built<K, V> {
-            buckets: HashMap<usize, Vec<(K, V)>>
+            buckets: Buckets<K, V>
         }
 
         /// A [ConflictGraph] is an expensive structure to build, and once it's built
@@ -490,11 +492,6 @@ pub mod reckoning {
             V: Dependent,
             K: Clone + PartialEq + Eq,
             K: std::hash::Hash,
-
-            // debug only
-            K: std::fmt::Debug,
-            V: std::fmt::Debug,
-            <V as Dependent>::Dependency: std::fmt::Debug,
         {
             pub fn new() -> Self {
                 Self {
@@ -504,7 +501,7 @@ pub mod reckoning {
                 }
             }
 
-            fn insert(&mut self, key: K, val: V) {
+            pub fn insert(&mut self, key: K, val: V) {
                 let dep: HashSet<V::Dependency> = val.dependencies()
                                                      .collect();
                 
@@ -555,7 +552,7 @@ pub mod reckoning {
                 }
             }
 
-            fn color2(&mut self) {
+            fn color(&mut self) {
                 let nodes = &self.state;
                 let mut uncolored = nodes.len();
                 let mut palette = Vec::from([COLOR_ZERO]);
@@ -586,90 +583,6 @@ pub mod reckoning {
 
                     uncolored -= 1;
                 }
-                
-                // We have leftover uncolored nodes, they can have their own color
-                //if uncolored > 0 {
-                //    let paint_brush = ConflictColor(palette.len());
-                //    palette.push(paint_brush);
-                //    
-                //    for node in nodes.iter() {
-                //        if node.color.get().is_none() {
-                //            node.color.set(Some(paint_brush));
-                //            uncolored -= 1;
-                //        }
-                //    }
-                //}
-
-                debug_assert!(uncolored == 0);
-            }
-
-            fn color(&mut self) {
-                panic!();
-
-                let nodes = &self.state;
-                let mut uncolored = self.state.len();
-                let mut palette = Vec::from([COLOR_ZERO]);
-
-                while let Some(node) = self.pick_next() {
-                    let mut paint_brush: Option<ConflictColor> = None;
-
-                    // for each color in our palette, test if we've already
-                    // painted a neighbor with that color, if we haven't,
-                    for color in palette.iter().cloned() {
-                        for neighbor_color 
-                        in node.edges.borrow()
-                                     .iter()
-                                     .filter_map(|i|
-                                        nodes.get(*i)
-                                             .and_then(|n| 
-                                                n.color.get())) {
-                            if color == neighbor_color {
-                                // matching colors, can't use
-                                if let Some(brush) = paint_brush {
-                                    if neighbor_color == brush {
-                                        paint_brush = None;
-                                    }
-                                }
-                                
-                                continue;
-                            } else {
-                                paint_brush = Some(color);
-                            }
-                        }
-                        // if we get here, we have found a color we can use
-                        //{
-                        //    paint_brush = Some(color);
-                        //    break;
-                        //}
-                    }
-
-                    
-
-                    // do we have a color on our brush? If we don't
-                    // then we have to create a new one
-                    if paint_brush.is_none() {
-                        paint_brush = Some(ConflictColor(palette.len()));
-                        palette.push(paint_brush.to_owned().expect("expected color"));
-                    }
-
-                    println!("\tcoloring node {:?} with {:?}\n", node.key, paint_brush.unwrap().0);
-                    node.color.set(paint_brush);
-                    uncolored -= 1;
-                }
-
-                // We have leftover uncolored nodes, they can have their own color
-                if uncolored > 0 {
-                    let paint_brush = ConflictColor(palette.len());
-                    palette.push(paint_brush);
-                    
-                    for node in nodes.iter() {
-                        if node.color.get().is_none() {
-                            node.color.set(Some(paint_brush));
-                            uncolored -= 1;
-                        }
-                    }
-                }
-
                 debug_assert!(uncolored == 0);
             }
             
@@ -708,26 +621,24 @@ pub mod reckoning {
                         continue;
                     }
                 }
-                println!("picked candidate with: {} colored neighbors and {} uncolored neighbors", candidate_colored, candidate_uncolored);
                 candidate
             }
 
-            fn build(mut self) -> ConflictGraph<K, V, Built<K, V>> {
-                self.color2();
+            pub fn build(mut self) -> ConflictGraph<K, V, Built<K, V>> {
+                self.color();
 
                 let mut buckets = HashMap::new();
                 
                 // destructively iterate the state and fill up our buckets
                 for node in self.state.0.into_iter() {
                     let color = node.color.get().expect("please report this bug - all nodes must be colored");
-                    println!("======COLOR: {:?}", &color);
                     
                     // we're wrapping kv in an Option to use the take().unwrap()
                     // methods to bypass a deficiency with borrow-checking in the
                     // entry API
                     let mut kv = Some((node.key, node.val));
 
-                    buckets.entry(color.as_index())
+                    buckets.entry(color.as_usize())
                            .and_modify(|e: &mut Vec<(K, V)>| e.push(kv.take().unwrap()))
                            .or_insert_with(|| vec![kv.take().unwrap()]);
                 }
@@ -749,6 +660,18 @@ pub mod reckoning {
             /// Returns an iterator over separate collections of non-conflicting items
             pub fn iter(&self) -> impl Iterator<Item = &Vec<(K, V)>> {
                 self.state.buckets.values()
+            }
+        }
+        
+        impl<K, V> IntoIterator for ConflictGraph<K, V, Built<K, V>>
+        where
+            V: Dependent
+        {
+            type Item = Vec<(K, V)>;
+            type IntoIter = IntoValues<usize, Vec<(K, V)>>;
+
+            fn into_iter(self) -> Self::IntoIter {
+                self.state.buckets.into_values()
             }
         }
 
@@ -805,34 +728,32 @@ pub mod reckoning {
                     Consumer { r: vec![Dep::Cyan], w: vec![Dep::Yellow] },
                     Consumer { r: vec![Dep::Cyan], w: vec![Dep::Green] },
                     Consumer { r: vec![Dep::Cyan, Dep::White], w: vec![Dep::Blue] },
+                    
                     Consumer { r: vec![], w: vec![Dep::White] },
                     Consumer { r: vec![], w: vec![Dep::Yellow] },
+
                     Consumer { r: vec![Dep::Cyan], w: vec![] },
                     Consumer { r: vec![Dep::Blue], w: vec![] },
+                    Consumer { r: vec![Dep::Cyan, Dep::Blue], w: vec![] },
+                    Consumer { r: vec![Dep::Blue, Dep::Green], w: vec![] },
+                    
                     Consumer { r: vec![Dep::Green], w: vec![] },
                     Consumer { r: vec![Dep::Yellow], w: vec![] },
                 ];
 
-                println!("new graph");
                 let mut graph = ConflictGraph::new();
                 
-                println!("initializing graph");
                 for (index, resource) in resources.into_iter().enumerate() {
                     graph.insert(index, resource);
                 }
 
-                dbg!(&graph);
-
-                println!("building graph");
                 let conflict_free = graph.build();
-                
-                println!("result:");
                 
                 for (index, bucket) in conflict_free.iter().enumerate() {
                     println!("bucket: {}", index);
                     for (i, consumer) in bucket {
                         let s_writes = format!("*{:?}*", consumer.w);
-                        println!("\t\t{}:{:24}{:?}", i, s_writes, consumer.r);
+                        println!("\t\t{:3}:{:24}{:?}", i, s_writes, consumer.r);
                     }
                 }
             }
@@ -845,9 +766,8 @@ pub mod reckoning {
     /// [crate::database::reckoning::EntityDatabase]
     pub mod transform {
         use std::collections::HashMap;
-        use std::collections::HashSet;
+        use std::hash::Hash;
         use std::marker::PhantomData;
-        use crate::database::ConflictColor;
         use crate::database::ConflictGraph;
         use crate::database::Dependent;
         use crate::id::FamilyId;
@@ -858,38 +778,95 @@ pub mod reckoning {
         use super::EntityDatabase;
 
         pub struct Phase {
-            conflicts: ConflictGraph<TransformationId, DynTransformation>,
-            subphases: HashMap<ConflictColor, Vec<()>>,
+            subphases: Vec<HashMap<TransformationId, DynTransform>>,
         }
+
         impl Phase {
             pub fn new() -> Self {
-                Self {
-                    conflicts: todo!(), //ConflictGraph::new(),
-                    subphases: HashMap::new(), 
+                Phase {
+                    subphases: Vec::new()
                 }
             }
-            pub fn add_transformation(&mut self, _transofmration: impl Transformation) {
-                // Resolve conflicts each time we add a transformation
 
+            pub fn add_transformation<T>(&mut self, tr: T)
+            where
+                T: Transformation,
+            {
+                // TODO:
+                // This is super inefficient, some sort of from_iter implementation
+                // or or defered building of the conflict graph would help
+                let dyn_transform = DynTransform { ptr: Box::new(tr) }; // ========== Inject Read/Write requirements here
+                let transform_tuple = (T::id(), dyn_transform);
+                
+                // Resolve conflicts each time we add a transformation
+                let transforms: Vec<(TransformationId, DynTransform)> = 
+                    self.subphases
+                    .drain(..)
+                    .flatten()
+                    .chain([transform_tuple].into_iter())
+                    .collect();
+
+                let mut graph = ConflictGraph::new();
+                
+                transforms.into_iter()
+                          .for_each(|(k, v)| graph.insert(k, v));
+                
+                let deconflicted = graph.build();
+                
+                deconflicted.into_iter().for_each(|bucket| {
+                    let subphase: HashMap<TransformationId, DynTransform> = HashMap::from_iter(bucket.into_iter());
+                    self.subphases.push(subphase);
+                });
             }
+
             pub fn run_on(&mut self, _db: &EntityDatabase) -> PhaseResult {
-                for subphase in self.subphases.iter_mut() {
-                    // queue jobs here
+                for _ in self.subphases.iter_mut() {
+                    todo!()
+                    // queue jobs one subphase at a time
                 }
                 Ok(())
             }
         }
         
-        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        pub struct TransformationId {}
-        pub trait Transformation {
-            type Data;
-            fn run(data: Rows<Self::Data>) -> TransformationResult;
-            fn messages(_messages: Messages) { return; }
+        impl FromIterator<DynTransform> for Phase {
+            fn from_iter<T: IntoIterator<Item = DynTransform>>(iter: T) -> Self {
+                todo!()
+            }
         }
-        pub trait Runs {}
-        pub struct DynTransformation {}
-        impl Dependent for DynTransformation {
+
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct TransformationId(std::any::TypeId);
+        
+        pub trait Transformation: 'static {
+            type Data: Selection;
+            fn run(data: Rows<Self::Data>) -> TransformationResult;
+            fn messages(_: Messages) { todo!() }
+            
+            fn id() -> TransformationId where Self: 'static {
+                TransformationId(std::any::TypeId::of::<Self>())
+            }
+        }
+        
+        pub trait Runs {
+            fn run_on(&self, db: &EntityDatabase) -> TransformationResult;
+        }
+        
+        impl<RTuple> Runs for RTuple
+        where
+            RTuple: Transformation,
+            RTuple::Data: Selection,
+        {
+            fn run_on(&self, db: &EntityDatabase) -> TransformationResult {
+                let rows = RTuple::Data::as_rows::<RTuple::Data>(db);
+                RTuple::run(rows)
+            }
+        }
+        
+        struct DynTransform {
+            ptr: Box<dyn Runs>,
+        }
+
+        impl Dependent for DynTransform {
             type Dependency = StableTypeId;
 
             fn dependencies(&self) -> impl Iterator<Item = Self::Dependency> {
@@ -905,11 +882,13 @@ pub mod reckoning {
         pub trait MetaData {}
         impl<'db, C> MetaData for Read<C> where C: Component {}
         impl<'db, C> MetaData for Write<C> where C: Component {}
+        
         pub struct RowIter<'db, RTuple> {
             pub(crate) db: &'db EntityDatabase,
             pub(crate) family: FamilyId,
             pub(crate) marker: PhantomData<RTuple>,
         }
+
         impl<'db, RTuple> RowIter<'db, RTuple> {
             pub fn new(db: &'db EntityDatabase, family: FamilyId) -> Self {
                 Self { db, family, marker: PhantomData::default() }
@@ -925,6 +904,7 @@ pub mod reckoning {
             type Type = C;
             type Ref = &'db Self::Type;
         }
+
         impl<'db, C> SelectOne<'db> for Write<C>
         where
             Self: 'db,
@@ -934,12 +914,27 @@ pub mod reckoning {
             type Ref = &'db mut Self::Type;
         }
 
-        pub trait Selection {}
+        pub trait Selection {
+            fn as_rows<'db, T>(db: &'db EntityDatabase) -> Rows<'db, T> {
+                
+                #![allow(unreachable_code, unused_variables)] todo!("actually get a family id set");
+                
+                let fs = FamilyIdSet::default();
+                crate::database::Rows {
+                    db,
+                    fs,
+                    marker: PhantomData::default(), 
+                }
+
+            }
+        }
+
         pub struct Rows<'db, RTuple> {
             db: &'db EntityDatabase,
             fs: FamilyIdSet,
             marker: PhantomData<RTuple>,
         }
+
         impl<'db, RTuple> Rows<'db, RTuple> {
             pub fn database(&self) -> &'db EntityDatabase { self.db }
             pub fn families(&self) -> FamilyIdSet { self.fs.clone() }
@@ -952,6 +947,7 @@ pub mod reckoning {
         pub trait Reads {}
         pub trait Writes {}
         pub struct RwSet {}
+
         #[derive(Debug)]
         pub enum TransformationError {}
         pub type TransformationResult = Result<(), TransformationError>;
@@ -995,6 +991,10 @@ pub mod reckoning {
                     type IntoIter = RowIter<'db, ($($t,)+)>;
 
                     fn into_iter(self) -> Self::IntoIter {
+                        
+                        #![allow(unreachable_code, unused_variables)] todo!("into_iter");
+
+
                         let db = self.database();
                         let fs = self.families();
 
@@ -1018,6 +1018,16 @@ pub mod reckoning {
                         todo!()
                     }
                 }
+
+                impl<'a, $($t,)+> crate::database::Selection for ($($t,)+)
+                where
+                    $(
+                        $t: MetaData,
+                        $t: SelectOne<'a>,
+                    )+
+                {
+                    
+                }
             };
         }
     } // macros ========================================================================
@@ -1028,6 +1038,7 @@ pub use reckoning::transform;
 pub use reckoning::transform::Rows;
 pub use reckoning::transform::MetaData;
 pub use reckoning::transform::SelectOne;
+pub use reckoning::transform::Selection;
 pub use reckoning::transform::RowIter;
 pub use reckoning::conflict;
 pub use reckoning::conflict::ConflictGraph;
@@ -1104,7 +1115,7 @@ mod vehicle_example {
     }
     impl Component for Driver {}
     
-    struct DriveTrain {}
+    struct DriveTrain;
     impl Transformation for DriveTrain {
         type Data = (Read<Engine>, Read<Transmission>, Write<Wheels>);
 
@@ -1115,8 +1126,8 @@ mod vehicle_example {
             Ok(())
         }
     }
-    
-    struct DriverInput {}
+
+    struct DriverInput;
     impl Transformation for DriverInput {
         type Data = (Read<Driver>, Write<Transmission>, Write<Engine>);
 
@@ -1138,7 +1149,7 @@ mod vehicle_example {
         }        
     }
     
-    struct WheelPhysics {}
+    struct WheelPhysics;
     impl Transformation for WheelPhysics {
         type Data = (Write<Wheels>, Read<Chassis>, Write<Physics>);
 
@@ -1216,11 +1227,17 @@ mod vehicle_example {
         // phases. Each phase will run sequentially, and each transformation
         // in a phase will (try to) run in parallel 
         let mut input_phase = Phase::new();
-        input_phase.add_transformation(DriverInput{});
+        input_phase.add_transformation(DriverInput);
         let mut physics_phase = Phase::new();
-        physics_phase.add_transformation(DriveTrain{});
-        physics_phase.add_transformation(WheelPhysics{});
+        physics_phase.add_transformation(DriveTrain);
+        physics_phase.add_transformation(WheelPhysics);
 
+        let exp_phase = Phase::from_iter([
+            DynTransform{ ptr: Box::new(DriveTrain) },
+            DriveTrain,
+            WheelPhysics,
+        ]);
+        
         // The simulation loop. Here we can see that, fundamentally, the
         // simulation is nothing but a set of transformations on our
         // dataset run over and over. By adding more components and
@@ -1231,15 +1248,13 @@ mod vehicle_example {
             physics_phase.run_on(&db).unwrap();
             
             // Here we allow the database to communicate back with the
-            // simulation loop
+            // simulation loop through commands
             while let Some(command) = db.query_commands() {
                 match command {
                     Command::Quit => break,
                 }
             }
         }
-
-        //dbg!(&db);
     }
 }
 
