@@ -4,6 +4,7 @@
 
 #![feature(const_type_name)]
 #![feature(once_cell)]
+#![feature(const_trait_impl)]
 #![feature(return_position_impl_trait_in_trait)]
 
 #[macro_use]

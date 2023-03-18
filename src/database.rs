@@ -5,13 +5,13 @@ pub mod reckoning {
     use std::any::Any;
     use std::cell::UnsafeCell;
     use std::ptr::NonNull;
-    use std::sync::{Arc, RwLock};
+    use std::sync::Arc;
     use std::collections::{HashMap, BTreeSet};
     use crate::EntityId;
     use crate::id::{StableTypeId, FamilyId};
 
-    type CType = crate::comps::ComponentType;
-    type CTypeSet = crate::comps::ComponentTypeSet;
+    type CType = self::ComponentType;
+    type CTypeSet = self::ComponentTypeSet;
     
     /// Borrowed
     /// 
@@ -331,6 +331,15 @@ pub mod reckoning {
         families_containing_set: HashMap<CTypeSet, FamilyIdSet>,
     }
     
+    #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct ComponentType(StableTypeId);
+
+    impl ComponentType {
+        const fn of<C: Component>() -> Self {
+            Self(StableTypeId::of::<Self>())
+        }
+    }
+
     #[derive(Clone)]
     pub struct ComponentTypeSet {
         ptr: Arc<BTreeSet<CType>>, // thread-local?
@@ -410,16 +419,22 @@ pub mod reckoning {
     } // transfer ======================================================================
 
     pub mod conflict {
-        use std::{collections::{HashSet, HashMap, btree_map::Values, hash_map::IntoValues}, cell::{Cell, RefCell}, marker::PhantomData, ops::{Deref, DerefMut}};
+        use std::{collections::{HashSet, HashMap, hash_map::IntoValues}, cell::{Cell, RefCell}, marker::PhantomData, ops::{Deref, DerefMut}};
 
         pub trait Dependent {
             type Dependency: PartialEq + Eq + std::hash::Hash;
-            fn dependencies(&self) -> impl Iterator<Item = Self::Dependency>;
-            fn exclusive_dependencies(&self) -> impl Iterator<Item = Self::Dependency> {
+            
+            // The 'iter lifetime associated with these two functions deserves to
+            // be reviewed. The only reason this trait is structured this way is
+            // to avoid polluting the code with additional lifetimes. The resulting
+            // compromise is that [Self::Dependency]'s yielded by the returned
+            // iterators must be copied or cloned, they cannot yield references
+            fn dependencies<'iter>(&'iter self) -> impl Iterator<Item = Self::Dependency> + 'iter;
+            fn exclusive_dependencies<'iter>(&'iter self) -> impl Iterator<Item = Self::Dependency> + 'iter {
                 std::iter::empty()
             }
         }
-
+        
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub struct ConflictColor(usize);
         impl ConflictColor {
@@ -768,10 +783,10 @@ pub mod reckoning {
         use std::collections::HashMap;
         use std::hash::Hash;
         use std::marker::PhantomData;
+        use crate::database::ComponentType;
         use crate::database::ConflictGraph;
         use crate::database::Dependent;
         use crate::id::FamilyId;
-        use crate::id::StableTypeId;
 
         use super::FamilyIdSet;
         use super::Component;
@@ -793,14 +808,31 @@ pub mod reckoning {
                 T: Transformation,
             {
                 // TODO:
-                // This is super inefficient, some sort of from_iter implementation
-                // or or defered building of the conflict graph would help
-                let dyn_transform = DynTransform { ptr: Box::new(tr) }; // ========== Inject Read/Write requirements here
-                let transform_tuple = (T::id(), dyn_transform);
+                // Rebuilding the graph with every insert is super inefficient,
+                // some sort of from_iter implementation or a defered building
+                // of the conflict graph would help here
                 
+                let reads = T::Data::READS
+                    .iter()
+                    .cloned()
+                    .filter_map(|item| item)
+                    .collect();
+                let writes = T::Data::WRITES
+                    .iter()
+                    .cloned()
+                    .filter_map(|item| item)
+                    .collect();
+
+                let dyn_transform = DynTransform {
+                    ptr: Box::new(tr),
+                    reads,
+                    writes,
+                }; // ========== Inject Read/Write requirements here
+
+                let transform_tuple = (T::id(), dyn_transform);
+
                 // Resolve conflicts each time we add a transformation
-                let transforms: Vec<(TransformationId, DynTransform)> = 
-                    self.subphases
+                let transforms: Vec<(TransformationId, DynTransform)> = self.subphases
                     .drain(..)
                     .flatten()
                     .chain([transform_tuple].into_iter())
@@ -827,12 +859,6 @@ pub mod reckoning {
                 Ok(())
             }
         }
-        
-        impl FromIterator<DynTransform> for Phase {
-            fn from_iter<T: IntoIterator<Item = DynTransform>>(iter: T) -> Self {
-                todo!()
-            }
-        }
 
         #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub struct TransformationId(std::any::TypeId);
@@ -842,11 +868,12 @@ pub mod reckoning {
             fn run(data: Rows<Self::Data>) -> TransformationResult;
             fn messages(_: Messages) { todo!() }
             
+            /// Returns a unique identifier for a given transformation impl
             fn id() -> TransformationId where Self: 'static {
                 TransformationId(std::any::TypeId::of::<Self>())
             }
         }
-        
+
         pub trait Runs {
             fn run_on(&self, db: &EntityDatabase) -> TransformationResult;
         }
@@ -864,13 +891,19 @@ pub mod reckoning {
         
         struct DynTransform {
             ptr: Box<dyn Runs>,
+            reads: Vec<ComponentType>,
+            writes: Vec<ComponentType>,
         }
 
         impl Dependent for DynTransform {
-            type Dependency = StableTypeId;
+            type Dependency = ComponentType;
 
-            fn dependencies(&self) -> impl Iterator<Item = Self::Dependency> {
-                std::iter::empty()
+            fn dependencies<'iter>(&'iter self) -> impl Iterator<Item = Self::Dependency> + 'iter {
+                self.reads.iter().cloned()
+            }
+
+            fn exclusive_dependencies<'iter>(&'iter self) -> impl Iterator<Item = Self::Dependency> + 'iter {
+                self.writes.iter().cloned()
             }
         }
 
@@ -895,23 +928,38 @@ pub mod reckoning {
             }
         }
         
-        pub trait SelectOne<'db> { type Ref; type Type; }
-        impl<'db, C> SelectOne<'db> for Read<C>
+        #[const_trait]
+        pub trait SelectOne<'db> {
+            type Ref;
+            type Type;
+            fn reads() -> Option<ComponentType> { None }
+            fn writes() -> Option<ComponentType> { None }
+        }
+
+        impl<'db, C> const SelectOne<'db> for Read<C>
         where
             Self: 'db,
             C: Component,
         {
             type Type = C;
             type Ref = &'db Self::Type;
+
+            fn reads() -> Option<ComponentType> {
+                Some(ComponentType::of::<Self::Type>())
+            }
         }
 
-        impl<'db, C> SelectOne<'db> for Write<C>
+        impl<'db, C> const SelectOne<'db> for Write<C>
         where
             Self: 'db,
             C: Component,
         {
             type Type = C;
             type Ref = &'db mut Self::Type;
+ 
+            fn writes() -> Option<ComponentType> {
+                Some(ComponentType::of::<Self::Type>())
+            }
         }
 
         pub trait Selection {
@@ -925,8 +973,10 @@ pub mod reckoning {
                     fs,
                     marker: PhantomData::default(), 
                 }
-
             }
+
+            const READS: &'static [Option<ComponentType>];
+            const WRITES: &'static [Option<ComponentType>];
         }
 
         pub struct Rows<'db, RTuple> {
@@ -1023,10 +1073,11 @@ pub mod reckoning {
                 where
                     $(
                         $t: MetaData,
-                        $t: SelectOne<'a>,
+                        $t: ~const SelectOne<'a>,
                     )+
                 {
-                    
+                    const READS: &'static [Option<ComponentType>] = &[$($t::reads(),)+];
+                    const WRITES: &'static [Option<ComponentType>] = &[$($t::writes(),)+];
                 }
             };
         }
@@ -1045,6 +1096,7 @@ pub use reckoning::conflict::ConflictGraph;
 pub use reckoning::conflict::ConflictColor;
 pub use reckoning::conflict::Dependent;
 pub use reckoning::Component;
+pub use reckoning::ComponentType;
 pub use reckoning::EntityDatabase;
 
 // Macro Impl's
@@ -1166,18 +1218,6 @@ mod vehicle_example {
     
     #[test]
     fn vehicle_example() {
-        {
-            const CLEAR: &str = "\x1B[2J\x1B[1;H";
-            for n in 0..10 {
-                println!("{CLEAR}[{:9}]", "|".repeat(n));
-                //println!("{n:02}");
-
-                std::thread::sleep(std::time::Duration::from_millis(200));
-            }
-            println!("done");
-            return;
-        }
-
         std::env::set_var("RUST_BACKTRACE", "1");
         
         let mut db = EntityDatabase::new();
@@ -1226,26 +1266,18 @@ mod vehicle_example {
         // another set of transformations, you must break them into distinct
         // phases. Each phase will run sequentially, and each transformation
         // in a phase will (try to) run in parallel 
-        let mut input_phase = Phase::new();
-        input_phase.add_transformation(DriverInput);
-        let mut physics_phase = Phase::new();
-        physics_phase.add_transformation(DriveTrain);
-        physics_phase.add_transformation(WheelPhysics);
+        let mut sim_phase = Phase::new();
+        sim_phase.add_transformation(DriveTrain);
+        sim_phase.add_transformation(WheelPhysics);
+        sim_phase.add_transformation(DriverInput);
 
-        let exp_phase = Phase::from_iter([
-            DynTransform{ ptr: Box::new(DriveTrain) },
-            DriveTrain,
-            WheelPhysics,
-        ]);
-        
         // The simulation loop. Here we can see that, fundamentally, the
         // simulation is nothing but a set of transformations on our
         // dataset run over and over. By adding more components and
         // transformations to the simulation we expand its capabilities
         // while automatically leveraging parallelism
         loop {
-            input_phase.run_on(&db).unwrap();
-            physics_phase.run_on(&db).unwrap();
+            sim_phase.run_on(&db).unwrap();
             
             // Here we allow the database to communicate back with the
             // simulation loop through commands
@@ -1254,6 +1286,8 @@ mod vehicle_example {
                     Command::Quit => break,
                 }
             }
+
+            break;
         }
     }
 }

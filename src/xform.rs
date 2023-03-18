@@ -385,7 +385,7 @@ macro_rules! impl_tdata_tuple {
                     .into_iter()
                     .flatten()
                     .collect();
-
+                
                 RwSet {
                     r: rset,
                     w: wset,
@@ -498,7 +498,7 @@ macro_rules! impl_tdata_tuple {
                         None => { std::hint::spin_loop(); continue; },
                     }
                 };
-
+                
                 RowIter {
                     db: self.db,
                     family_iter: Some(family_iter),
