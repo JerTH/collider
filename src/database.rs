@@ -4,11 +4,14 @@
 pub mod reckoning {
     use std::any::Any;
     use std::cell::UnsafeCell;
+    use std::error::Error;
+    use std::fmt::Display;
     use std::ptr::NonNull;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockWriteGuard, RwLockReadGuard};
     use std::collections::{HashMap, BTreeSet};
+    use std::sync::atomic::{Ordering, AtomicU32};
     use crate::EntityId;
-    use crate::id::{StableTypeId, FamilyId};
+    use crate::id::{StableTypeId, FamilyId, IdUnion};
 
     type CType = self::ComponentType;
     type CTypeSet = self::ComponentTypeSet;
@@ -232,6 +235,8 @@ pub mod reckoning {
     } // borrowed ======================================================================
     use borrowed::*;
 
+    use self::transfer::TransferGraph;
+
     pub trait Component: 'static {}
 
     /// The owner of the actual data we are interested in. 
@@ -324,14 +329,147 @@ pub mod reckoning {
         size: usize,
     }
 
+    pub trait DbMapping<'db> {
+        type Guard;
+        type From;
+        type Map;
+        type To;
+    }
+
+    impl<'db, F, T> DbMapping<'db> for (F, T)
+    where
+        F: 'db,
+        T: 'db + Clone,
+    {
+        type Guard = RwLockWriteGuard<'db, Self::Map>;
+        type From = F;
+        type Map = HashMap<F, T>;
+        type To = T;
+    }
+
+    pub trait GetDbMap<'db, M: DbMapping<'db>> {
+        fn get(&self, from: &M::From) -> Option<M::To>;
+        fn mut_map(&'db self) -> Option<M::Guard>;
+    }
+
+    impl<'db> GetDbMap<'db, (ComponentTypeSet, FamilyId)> for DbMaps {
+        fn get(&self, from: &<(ComponentTypeSet, FamilyId) as DbMapping>::From) -> Option<<(ComponentTypeSet, FamilyId) as DbMapping>::To> {
+            self.component_group_to_family.read().ok().and_then(|g| g.get(from).cloned())
+        }
+
+        fn mut_map(&'db self) -> Option<<(ComponentTypeSet, FamilyId) as DbMapping>::Guard> {
+            self.component_group_to_family.write().ok()
+        }
+    }
+
+    impl<'db> GetDbMap<'db, (EntityId, FamilyId)> for DbMaps {
+        fn get(&self, from: &<(EntityId, FamilyId) as DbMapping>::From) -> Option<<(EntityId, FamilyId) as DbMapping>::To> {
+            self.entity_to_owning_family.read().ok().and_then(|g| g.get(from).cloned())
+        }
+
+        fn mut_map(&'db self) -> Option<<(EntityId, FamilyId) as DbMapping>::Guard> {
+            self.entity_to_owning_family.write().ok()
+        }
+    }
+
+    impl<'db> GetDbMap<'db, (CType, FamilyIdSet)> for DbMaps {
+        fn get(&self, from: &<(CType, FamilyIdSet) as DbMapping>::From) -> Option<<(CType, FamilyIdSet) as DbMapping>::To> {
+            self.families_containing_component.read().ok().and_then(|g| g.get(from).cloned())
+        }
+
+        fn mut_map(&'db self) -> Option<<(CType, FamilyIdSet) as DbMapping>::Guard> {
+            self.families_containing_component.write().ok()
+        }
+    }
+
+    impl<'db> GetDbMap<'db, (CTypeSet, FamilyIdSet)> for DbMaps {
+        fn get(&self, from: &<(CTypeSet, FamilyIdSet) as DbMapping>::From) -> Option<<(CTypeSet, FamilyIdSet) as DbMapping>::To> {
+            self.families_containing_set.read().ok().and_then(|g| g.get(from).cloned())
+        }
+
+        fn mut_map(&'db self) -> Option<<(CTypeSet, FamilyIdSet) as DbMapping>::Guard> {
+            self.families_containing_set.write().ok()
+        }
+    }
+
+    impl<'db> GetDbMap<'db, (FamilyId, CTypeSet)> for DbMaps {
+        fn get(&self, from: &<(FamilyId, CTypeSet) as DbMapping>::From) -> Option<<(FamilyId, CTypeSet) as DbMapping>::To> {
+            self.components_of_family.read().ok().and_then(|g| g.get(from).cloned())
+        }
+
+        fn mut_map(&'db self) -> Option<<(FamilyId, CTypeSet) as DbMapping>::Guard> {
+            self.components_of_family.write().ok()
+        }
+    }
+
+    impl<'db> GetDbMap<'db, (FamilyId, TransferGraph)> for DbMaps {
+        fn get(&self, from: &<(FamilyId, CTypeSet) as DbMapping>::From) -> Option<<(FamilyId, TransferGraph) as DbMapping>::To> {
+            self.transfer_graph_of_family.read().ok().and_then(|g| g.get(from).cloned())
+        }
+
+        fn mut_map(&'db self) -> Option<<(FamilyId, TransferGraph) as DbMapping>::Guard> {
+            self.transfer_graph_of_family.write().ok()
+        }
+    }
+
+    impl Component for () {}
+    fn foo() {
+        let maps = DbMaps::new();
+        let cty = ComponentType::of::<()>();
+        let set = maps.get::<(CType, FamilyIdSet)>(&cty);
+    }
+
+    /// Contains several maps used to cache relationships between
+    /// data in the [EntityDatabase]
     pub struct DbMaps {
-        component_group_to_family: HashMap<CTypeSet, FamilyId>,
-        entity_to_owning_family: HashMap<EntityId, FamilyId>,
-        families_containing_component: HashMap<CType, FamilyIdSet>,
-        families_containing_set: HashMap<CTypeSet, FamilyIdSet>,
+        component_group_to_family:      RwLock<HashMap<CTypeSet, FamilyId>>,
+        entity_to_owning_family:        RwLock<HashMap<EntityId, FamilyId>>,
+        families_containing_component:  RwLock<HashMap<CType,    FamilyIdSet>>,
+        families_containing_set:        RwLock<HashMap<CTypeSet, FamilyIdSet>>,
+        components_of_family:           RwLock<HashMap<FamilyId, CTypeSet>>,
+        transfer_graph_of_family:       RwLock<HashMap<FamilyId, TransferGraph>>,
     }
     
-    #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    impl<'db> DbMaps {
+        fn new() -> Self {
+            Self {
+                component_group_to_family: Default::default(),
+                entity_to_owning_family: Default::default(),
+                families_containing_component: Default::default(),
+                families_containing_set: Default::default(),
+                components_of_family: Default::default(),
+                transfer_graph_of_family: Default::default(),
+            }
+        }
+
+        /// Retrieves a value from a mapping, if it exists
+        /// 
+        /// Returned values are deliberately copied/cloned, rather than
+        /// referenced. This is to avoid issues of long-lived references
+        /// and so synchronization primitives are held for the shortest
+        /// time possible. As such, it is encourage to only map to small
+        /// values, or, large values stored behind a reference counted
+        /// pointer
+        pub fn get<M>(&self, from: &M::From) -> Option<M::To>
+        where
+            M: DbMapping<'db>,
+            Self: GetDbMap<'db, M>,
+            M::To: 'db,
+        {
+            <Self as GetDbMap<'db, M>>::get(&self, from)
+        }
+
+        pub fn mut_map<M: DbMapping<'db>>(&'db self) -> Option<M::Guard>
+        where
+            M: DbMapping<'db>,
+            Self: GetDbMap<'db, M>,
+            M::Map: 'db,
+        {
+            <Self as GetDbMap<'db, M>>::mut_map(&self)
+        }
+    }
+    
+    #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct ComponentType(StableTypeId);
 
     impl ComponentType {
@@ -340,11 +478,27 @@ pub mod reckoning {
         }
     }
 
-    #[derive(Clone)]
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct ComponentTypeSet {
         ptr: Arc<BTreeSet<CType>>, // thread-local?
     }
+
+    impl ComponentTypeSet {
+        fn contains(&self, component: &ComponentType) -> bool {
+            self.ptr.contains(component)
+        }
+
+        fn iter(&self) -> impl Iterator<Item = &CType> {
+            self.ptr.iter()
+        }
+    }
     
+    #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    enum ComponentDelta {
+        Add(ComponentType),
+        Rem(ComponentType),
+    }
+
     #[derive(Clone, Default)]
     pub struct FamilyIdSet {
         ptr: Arc<Vec<FamilyId>>, // thread-local?
@@ -365,31 +519,229 @@ pub mod reckoning {
         fn get_transfer(&self, _component: &CType) -> Option<transfer::Edge> { todo!() }
     }
 
+    #[derive(Debug)]
+    enum EntityAllocError {
+        PoisonedFreeList
+    }
+
+    impl Display for EntityAllocError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                EntityAllocError::PoisonedFreeList => write!(f, "poisoned free list mutex"),
+            }
+        }
+    }
+
+    impl Error for EntityAllocError {}
+    
+    type EntityFreeList = Vec<EntityId>;
+    type EntityAllocResult = Result<EntityId, EntityAllocError>;
+
+    impl<T> std::convert::From<PoisonError<T>> for EntityAllocError {
+        fn from(_: PoisonError<T>) -> Self {
+            EntityAllocError::PoisonedFreeList
+        }
+    }
+    
+    pub struct EntityAllocator {
+        count: AtomicU32,
+        free: Mutex<Vec<EntityId>>,
+    }
+
+    impl EntityAllocator {
+        fn new() -> Self {
+            Self {
+                count: AtomicU32::new(0),
+                free: Default::default(),
+            }
+        }
+
+        fn alloc(&self) -> EntityAllocResult {
+            // TODO: Better allocator: alloc blocks of ID's and cache them
+            // per-thread, re-alloc a block when a thread runs out, reclaiming
+            // the free list. ALternatively use a per thread free list
+
+            let mut guard = self.free.lock()?;
+
+            match guard.pop() {
+                Some(id) => {
+                    // SAFETY:
+                    // Accessing union fields is implicitely unsafe - here we copy
+                    // one union to another with the same accessor which is safe
+                    let idunion = unsafe { IdUnion { generational: id.generational } };
+                    Ok(EntityId(idunion))
+                },
+                None => {
+                    let count = self.count.fetch_add(1u32, Ordering::SeqCst);
+                    Ok(EntityId(IdUnion { generational: (count, 0, 0, 0) }))
+                },
+            }
+        }
+
+        fn free(&self, id: EntityId) -> Result<(), EntityAllocError> {
+            let mut guard = self.free.lock()?;
+            guard.push(id.next_generation());
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    pub enum CreateEntityError {
+        IdAllocatorError,
+    }
+
+    impl Display for CreateEntityError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                CreateEntityError::IdAllocatorError => write!(f, "entity id allocation error"),
+            }
+        }
+    }
+    
+    impl Error for CreateEntityError {}
+
+    impl From<EntityAllocError> for CreateEntityError {
+        fn from(_: EntityAllocError) -> Self {
+            CreateEntityError::IdAllocatorError
+        }
+    }
+
+    #[derive(Debug)]
+    pub enum EntityError {
+        EntityDoesntExist,
+        FailedToResolveTransfer,
+        FailedToFindFamily,
+        UnknownFamily,
+    }
+
+    impl Display for EntityError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                EntityError::EntityDoesntExist
+                    => write!(f, "entity doesn't exist"),
+                EntityError::FailedToResolveTransfer
+                    => write!(f, "failed to transfer entity between families"),
+                EntityError::FailedToFindFamily
+                    => write!(f, "failed to find a new family for this entity"),
+                EntityError::UnknownFamily 
+                    => write!(f, "requested family data is unknown or invalid"),
+            }
+        }
+    }
+
+    impl Error for EntityError {}
+
     pub struct EntityDatabase {
-        allocator: crate::db::EntityAllocator,
-        families: HashMap<FamilyId, Family>,
+        allocator: EntityAllocator,
         tables: HashMap<FamilyId, Table>,
         maps: DbMaps,
+        // cache?
     }
 
     impl EntityDatabase {
         /// Creates a new [EntityDatabase]
-        pub fn new() -> Self { todo!() }
+        pub fn new() -> Self {
+            Self {
+                allocator: EntityAllocator::new(),
+                tables: HashMap::new(),
+                maps: DbMaps::new(),
+            }
+        }
+
         /// Creates an entity, returning its [EntityId]
-        pub fn create(&self) -> EntityId { todo!() }
+        pub fn create(&self) -> Result<EntityId, CreateEntityError> {
+            let id = self.allocator.alloc()?;
+            Ok(id)
+        }
+
         /// Adds a [Component] to an entity
-        pub fn add_component<T: Component>(&mut self, _entity: EntityId, _component: T)
-            -> Result<(), ()> { todo!() }
+        pub fn add_component<C: Component>(&mut self, entity: EntityId, _: C) -> Result<(), EntityError> {
+            let cty = ComponentType::of::<C>();
+            let delta = ComponentDelta::Add(cty);
+
+            let family = self.find_new_family(&entity, &delta)?;
+            self.resolve_entity_transfer(&entity, &family)?;
+            
+            Ok(())
+        }
+
         /// Adds a single instance of a global component to the [EntityDatabase]
         /// A global component only ever has one instance, and is accessible by
         /// any system with standard Read/Write rules. Typical uses for a global
         /// component might be deferred events, or cross-cutting state such as
         /// input
-        pub fn add_global_component<T: Component>(&mut self) { todo!() }
+        pub fn add_global_component<T: Component>(&mut self) {
+            todo!()
+        }
+
         /// Retrieves the next [Command] generated by the [EntityDatabase], or
         /// returns [None] if there are no pending commands. Commands are used
         /// by the [EntityDatabase] to communicate with the main game loop
-        pub fn query_commands(&self) -> Option<Command> { todo!() }
+        pub fn query_commands(&self) -> Option<Command> {
+            // IMPL DETAILS
+            // Still don't have a clear picture of how this should work
+            // One thought is to have an implicit CommandQueue global component
+            // which can be queried regularly by systems (perhaps with a special
+            // Global<CommandQueue> accessor), from which the system can enqueue
+            // higher order commands as if it were a regular component
+            
+            todo!()
+        }
+
+        /// Computes the destination family for a given entity, after
+        /// a component change
+        fn find_new_family(&self, entity: &EntityId, delta: &ComponentDelta)
+            -> Result<FamilyId, EntityError>
+        {
+            let family = self.maps
+                .get::<(EntityId, FamilyId)>(entity)
+                .ok_or(EntityError::EntityDoesntExist)?;
+
+            todo!();
+            //match delta {
+            //    ComponentDelta::Add(component) => {
+            //        self.family_after_add(family, entity, component)
+            //    },
+            //    ComponentDelta::Rem(component) => {
+            //        self.family_after_remove(family, entity, component)
+            //    },
+            //}
+        }
+
+        fn family_after_add(&self, current: &FamilyId, entity: &EntityId, component: &ComponentType) -> Result<FamilyId, EntityError> {
+            match self.query_transfer_graph(current, component) {
+                Some(edge) => {
+                    if let transfer::Edge::Add(family_id) = edge {
+                        return Ok(family_id)
+                    }
+                },
+                None => todo!(),
+            }
+            
+            let components = self.maps
+                .get::<(FamilyId, ComponentTypeSet)>(current)
+                .ok_or(EntityError::UnknownFamily)?;
+
+            if components.contains(&component) {
+                return Ok(*current)
+            } else {
+                
+            }
+
+            Err(EntityError::FailedToResolveTransfer)
+        }
+        
+        fn family_after_remove(&self, _: &FamilyId, _: &EntityId, _: &ComponentType) -> Result<FamilyId, EntityError> {
+            todo!()
+        }
+
+        fn query_transfer_graph(&self, _: &FamilyId, _: &ComponentType) -> Option<transfer::Edge> {
+            None
+        }
+
+        fn resolve_entity_transfer(&self, _: &EntityId, _: &FamilyId) -> Result<(), EntityError> {
+            todo!()
+        }
     }
 
     /// A [Command] generated by an [EntityDatabase]
@@ -405,11 +757,13 @@ pub mod reckoning {
     /// family to another within an [super::EntityDatabase]
     mod transfer {
         use std::collections::HashMap;
+        use std::sync::Arc;
         use crate::id::FamilyId;
         use crate::database::reckoning::CType;
-
+        
+        #[derive(Clone)]
         pub struct TransferGraph {
-            links: HashMap<CType, Edge>,
+            links: Arc<HashMap<CType, Edge>>,
         }
         
         pub enum Edge {
@@ -484,11 +838,11 @@ pub mod reckoning {
         }
 
         /// A [ConflictGraph] is an expensive structure to build, and once it's built
-        /// it is considered entirely immutable, in addition to that, the data needed
-        /// to build the graph and the data needed to query a built graph is different.
+        /// it is considered entirely immutable, in addition, the data needed to
+        /// build the graph and the data needed to query a built graph is different.
         /// Because of these properties, we use type-state to encode an initializing
         /// state and a built state directly into the type system, with different
-        /// exposed methods and different internal representations
+        /// exposed methods and different internal representations on the two
         pub trait ConflictGraphState {}
         impl<K, V, D> ConflictGraphState for Init<K, V, D> {}
         impl<K, V> ConflictGraphState for Built<K, V> {}
@@ -605,6 +959,7 @@ pub mod reckoning {
                 let nodes = &self.state;
                 let mut candidate: Option<&ConflictGraphNode<K, V, <V as Dependent>::Dependency>> = None;
                 let (mut candidate_colored, mut candidate_uncolored) = (0, 0);
+                
                 for node in nodes.iter() {
                     
                     // skip already colored nodes
@@ -1215,7 +1570,7 @@ mod vehicle_example {
             Ok(())
         }
     }
-    
+
     #[test]
     fn vehicle_example() {
         std::env::set_var("RUST_BACKTRACE", "1");
@@ -1241,7 +1596,7 @@ mod vehicle_example {
         
         // Build the entities from the components we choose
         // This can be automated from data
-        let sports_car = db.create();
+        let sports_car = db.create().unwrap();
         db.add_component(sports_car, v8_engine.clone()).unwrap();
         db.add_component(sports_car, five_speed).unwrap();
         db.add_component(sports_car, sport_chassis).unwrap();
@@ -1249,7 +1604,7 @@ mod vehicle_example {
         db.add_component(sports_car, Physics::new()).unwrap();
         db.add_component(sports_car, Driver::PedalToTheMetal).unwrap();
 
-        let pickup_truck = db.create();
+        let pickup_truck = db.create().unwrap();
         db.add_component(pickup_truck, v8_engine).unwrap();
         db.add_component(pickup_truck, ten_speed).unwrap();
         db.add_component(pickup_truck, heavy_chassis).unwrap();
@@ -1265,7 +1620,7 @@ mod vehicle_example {
         // for a certain set of transformations to happen before or after
         // another set of transformations, you must break them into distinct
         // phases. Each phase will run sequentially, and each transformation
-        // in a phase will (try to) run in parallel 
+        // within a phase will (try to) run in parallel 
         let mut sim_phase = Phase::new();
         sim_phase.add_transformation(DriveTrain);
         sim_phase.add_transformation(WheelPhysics);

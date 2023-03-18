@@ -83,6 +83,17 @@ impl Debug for IdUnion {
 
 // `EntityId`
 impl EntityId {
+    pub(crate) fn next_generation(&self) -> Self {
+        unsafe {
+            EntityId(IdUnion { generational: (
+                self.generational.0,
+                self.generational.1.wrapping_add(1),
+                self.generational.2,
+                self.generational.3,
+            )})
+        }
+    }
+    
     pub(crate) fn generational(idx: u32, gen: u16, m1: u8, m2: u8) -> Self {
         EntityId(IdUnion{generational: (idx, gen, m1, m2)})
     }

@@ -362,7 +362,7 @@ impl EntityDatabase {
         if !self.registry.seen::<T>() {
             self.registry.register::<T>()
         }
-
+        
         let component_type = component!(T);
         let transform = self.get_family_transform(&entity, ComponentDelta::Add(component_type));
         self.resolve_transform(entity, component, transform)
