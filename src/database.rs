@@ -6,12 +6,13 @@ pub mod reckoning {
     use std::cell::UnsafeCell;
     use std::error::Error;
     use std::fmt::Display;
+    use std::hash::Hash;
     use std::ptr::NonNull;
     use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockWriteGuard, RwLockReadGuard};
-    use std::collections::{HashMap, BTreeSet};
+    use std::collections::{HashMap, BTreeSet, HashSet};
     use std::sync::atomic::{Ordering, AtomicU32};
     use crate::EntityId;
-    use crate::id::{StableTypeId, FamilyId, IdUnion};
+    use crate::id::{StableTypeId, IdUnion};
 
     type CType = self::ComponentType;
     type CTypeSet = self::ComponentTypeSet;
@@ -234,8 +235,63 @@ pub mod reckoning {
         }
     } // borrowed ======================================================================
     use borrowed::*;
-
     use self::transfer::TransferGraph;
+    
+    type CommutativeHashType = u64;
+    const COMMUTATIVE_HASH_TYPE_ZERO: CommutativeHashType = 0 as CommutativeHashType;
+    const COMMUTATIVE_HASH_PRIME: CommutativeHashType = 0x29233AAB26330D; // 11579208931619597
+
+    /// [CommutativeId]
+    #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    struct CommutativeId(CommutativeHashType);
+    const COMMUTATIVE_ID_INIT: CommutativeId = CommutativeId(COMMUTATIVE_HASH_PRIME);
+
+    impl CommutativeId {
+        pub fn and(&self, other: &CommutativeId) -> Self {
+            Self::combine(self, other)
+        }
+
+        fn combine(first: &Self, other: &Self) -> Self {
+            debug_assert!(first.non_zero());
+            debug_assert!(other.non_zero());
+
+            CommutativeId(
+                first.0
+                    .wrapping_add(other.0)
+                    .wrapping_add(other.0
+                        .wrapping_mul(first.0))
+            )
+        }
+
+        #[inline(always)]
+        fn non_zero(&self) -> bool {
+            !(self.0 == 0)
+        }
+    }
+
+    impl FromIterator<CommutativeId> for CommutativeId {
+        fn from_iter<T: IntoIterator<Item = CommutativeId>>(iter: T) -> Self {
+            iter.into_iter().fold(COMMUTATIVE_ID_INIT, |acc, x| {
+                CommutativeId::combine(&acc, &x); acc
+            })
+        }
+    }
+
+    impl FromIterator<CommutativeHashType> for CommutativeId {
+        fn from_iter<T: IntoIterator<Item = CommutativeHashType>>(iter: T) -> Self {
+            iter.into_iter().fold(COMMUTATIVE_ID_INIT, |acc, x| {
+                CommutativeId::combine(&acc, &CommutativeId(x)); acc
+            })
+        }
+    }
+
+    impl<'i> FromIterator<&'i CommutativeHashType> for CommutativeId {
+        fn from_iter<T: IntoIterator<Item = &'i CommutativeHashType>>(iter: T) -> Self {
+            iter.into_iter().fold(COMMUTATIVE_ID_INIT, |acc, x| {
+                CommutativeId::combine(&acc, &CommutativeId(*x)); acc
+            })
+        }
+    }
 
     pub trait Component: 'static {}
 
@@ -481,6 +537,7 @@ pub mod reckoning {
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct ComponentTypeSet {
         ptr: Arc<BTreeSet<CType>>, // thread-local?
+        id: u64,
     }
 
     impl ComponentTypeSet {
@@ -492,24 +549,75 @@ pub mod reckoning {
             self.ptr.iter()
         }
     }
-    
+
+    impl FromIterator<ComponentType> for ComponentTypeSet {
+        fn from_iter<T: IntoIterator<Item = ComponentType>>(iter: T) -> Self {
+            let mut id: u64 = 0;
+            
+            // sum the unique 64 bit id's for each component type
+            // and collect them into a set, use the summed id
+            // (which should have a similar likelyhood of collision
+            // as any 64 bit hash) and use that as the unique id for
+            // the set of components
+            let set: BTreeSet<ComponentType> = iter
+                .into_iter()
+                .map(|c| {id = id.wrapping_add(c.0.0); c})
+                .collect();
+            ComponentTypeSet { ptr: Arc::new(set), id }
+        }
+    }
+
     #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     enum ComponentDelta {
         Add(ComponentType),
         Rem(ComponentType),
     }
 
-    #[derive(Clone, Default)]
+    #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+    pub struct FamilyId(CommutativeId);
+
+    impl<'i> FromIterator<&'i ComponentType> for FamilyId {
+        fn from_iter<T: IntoIterator<Item = &'i ComponentType>>(iter: T) -> Self {
+            FamilyId(CommutativeId::from_iter(iter.into_iter().map(|id| id.0.0)))
+        }
+    }
+
+    type FamilyIdSetType = HashSet<FamilyId>;
+    type FamilyIdSetInnerType = (CommutativeId, FamilyIdSetType);
+
+    /// An immutable set of family id's
+    #[derive(Clone)]
     pub struct FamilyIdSet {
-        ptr: Arc<Vec<FamilyId>>, // thread-local?
+        ptr: Arc<FamilyIdSetInnerType>, // thread-local?
     }
 
     impl FamilyIdSet {
-        pub fn get(&self, index: usize) -> Option<FamilyId> {
-            self.ptr.get(index).cloned()
+        pub fn contains(&self, id: &FamilyId) -> bool {
+            self.ptr.1.contains(id)
+        }
+
+        pub fn iter(&self) -> impl Iterator<Item = &FamilyId> {
+            self.ptr.1.iter()
         }
     }
-    
+
+    impl<'i> FromIterator<FamilyId> for FamilyIdSet {
+        fn from_iter<I: IntoIterator<Item = FamilyId>>(iter: I) -> Self {
+            let set: FamilyIdSetType = iter.into_iter().collect();
+            let set_id = CommutativeId::from_iter(set.iter().map(|id| id.0));
+            FamilyIdSet { ptr: Arc::new((set_id, set)) }
+        }
+    }
+
+    impl<'i, I> From<I> for FamilyIdSet
+    where
+        I: IntoIterator<Item = &'i FamilyId>,
+    {
+        fn from(into_iter: I) -> Self {
+            FamilyIdSet::from_iter(into_iter.into_iter().cloned())
+        }
+    }
+
     pub struct Family {
         components_set: CTypeSet,
         transfer_graph: transfer::TransferGraph,
@@ -607,35 +715,42 @@ pub mod reckoning {
     }
 
     #[derive(Debug)]
-    pub enum EntityError {
+    pub enum DbError {
         EntityDoesntExist,
         FailedToResolveTransfer,
         FailedToFindFamily,
-        UnknownFamily,
+        EntityBelongsToUnknownFamily,
+        FailedToAcquireMapping,
     }
 
-    impl Display for EntityError {
+    impl Display for DbError {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
-                EntityError::EntityDoesntExist
-                    => write!(f, "entity doesn't exist"),
-                EntityError::FailedToResolveTransfer
-                    => write!(f, "failed to transfer entity between families"),
-                EntityError::FailedToFindFamily
-                    => write!(f, "failed to find a new family for this entity"),
-                EntityError::UnknownFamily 
-                    => write!(f, "requested family data is unknown or invalid"),
+                DbError::EntityDoesntExist => {
+                    write!(f, "entity doesn't exist")
+                },
+                DbError::FailedToResolveTransfer => {
+                    write!(f, "failed to transfer entity between families")
+                },
+                DbError::FailedToFindFamily => {
+                    write!(f, "failed to find a new family for this entity")
+                },
+                DbError::EntityBelongsToUnknownFamily => {
+                    write!(f, "requested family data is unknown or invalid")
+                },
+                DbError::FailedToAcquireMapping => {
+                    write!(f, "failed to acquire requested mapping")
+                },
             }
         }
     }
-
-    impl Error for EntityError {}
+    
+    impl Error for DbError {}
 
     pub struct EntityDatabase {
         allocator: EntityAllocator,
         tables: HashMap<FamilyId, Table>,
-        maps: DbMaps,
-        // cache?
+        maps: DbMaps, // cache?
     }
 
     impl EntityDatabase {
@@ -655,7 +770,7 @@ pub mod reckoning {
         }
 
         /// Adds a [Component] to an entity
-        pub fn add_component<C: Component>(&mut self, entity: EntityId, _: C) -> Result<(), EntityError> {
+        pub fn add_component<C: Component>(&mut self, entity: EntityId, _: C) -> Result<(), DbError> {
             let cty = ComponentType::of::<C>();
             let delta = ComponentDelta::Add(cty);
 
@@ -687,28 +802,27 @@ pub mod reckoning {
             
             todo!()
         }
-
+        
         /// Computes the destination family for a given entity, after
-        /// a component change
+        /// a component addition or removal
         fn find_new_family(&self, entity: &EntityId, delta: &ComponentDelta)
-            -> Result<FamilyId, EntityError>
-        {
+        -> Result<FamilyId, DbError> {
             let family = self.maps
                 .get::<(EntityId, FamilyId)>(entity)
-                .ok_or(EntityError::EntityDoesntExist)?;
+                .ok_or(DbError::EntityDoesntExist)?;
 
-            todo!();
-            //match delta {
-            //    ComponentDelta::Add(component) => {
-            //        self.family_after_add(family, entity, component)
-            //    },
-            //    ComponentDelta::Rem(component) => {
-            //        self.family_after_remove(family, entity, component)
-            //    },
-            //}
+            match delta {
+                ComponentDelta::Add(component) => {
+                    self.family_after_add(&family, entity, component)
+                },
+                ComponentDelta::Rem(component) => {
+                    self.family_after_remove(&family, entity, component)
+                },
+            }
         }
 
-        fn family_after_add(&self, current: &FamilyId, entity: &EntityId, component: &ComponentType) -> Result<FamilyId, EntityError> {
+        fn family_after_add(&self, current: &FamilyId, entity: &EntityId, component: &ComponentType)
+        -> Result<FamilyId, DbError> {
             match self.query_transfer_graph(current, component) {
                 Some(edge) => {
                     if let transfer::Edge::Add(family_id) = edge {
@@ -720,18 +834,77 @@ pub mod reckoning {
             
             let components = self.maps
                 .get::<(FamilyId, ComponentTypeSet)>(current)
-                .ok_or(EntityError::UnknownFamily)?;
+                .ok_or(DbError::EntityBelongsToUnknownFamily)?;
 
             if components.contains(&component) {
                 return Ok(*current)
             } else {
-                
+                let new_components_iter = components.iter().cloned().chain([*component]);
+                let new_components = ComponentTypeSet::from_iter(new_components_iter);
+                let family = self.maps
+                    .get::<(ComponentTypeSet, FamilyId)>(&new_components);
+
+                if let Some(family) = family {
+                    return Ok(family)
+                } else {
+                    return Ok(self.new_family(new_components)?);
+                }
+            }
+        }
+
+        fn family_after_remove(&self, _: &FamilyId, _: &EntityId, _: &ComponentType) -> Result<FamilyId, DbError> {
+            todo!()
+        }
+
+        /// Creates a new family, sets up the default db mappings for the family
+        fn new_family(&self, components: ComponentTypeSet) -> Result<FamilyId, DbError> {
+            let id = FamilyId::from_iter(components.iter());
+            
+            // We map each family to the set of components it represents
+            {
+                let mut guard = self.maps
+                    .mut_map::<(FamilyId, CTypeSet)>()
+                    .ok_or(DbError::FailedToAcquireMapping)?;
+                guard.insert(id, components.clone());
             }
 
-            Err(EntityError::FailedToResolveTransfer)
-        }
-        
-        fn family_after_remove(&self, _: &FamilyId, _: &EntityId, _: &ComponentType) -> Result<FamilyId, EntityError> {
+            // We reverse map each set of components to its family id
+            {
+                let mut guard = self.maps
+                    .mut_map::<(CTypeSet, FamilyId)>()
+                    .ok_or(DbError::FailedToAcquireMapping)?;
+                guard.insert(components.clone(), id);
+            }
+
+            // We map each family to an associated transfer graph
+            {
+                let mut guard = self.maps
+                    .mut_map::<(FamilyId, TransferGraph)>()
+                    .ok_or(DbError::FailedToAcquireMapping)?;
+                guard.insert(id, TransferGraph::new());
+            }
+
+            // We map each component type in the set to every family that contains it
+            {
+                let mut guard = self.maps
+                    .mut_map::<(CType, FamilyIdSet)>()
+                    .ok_or(DbError::FailedToAcquireMapping)?;
+
+                for cty in components.iter() {
+                    let set;
+
+                    match guard.remove(cty) {
+                        Some(old_family_set) => {
+                            set = FamilyIdSet::from(old_family_set.iter().chain([&id]));
+                        },
+                        None => {
+                            set = FamilyIdSet::from(&[id]);
+                        },
+                    }
+                    guard.insert(*cty, set);
+                }
+            }
+
             todo!()
         }
 
@@ -739,7 +912,7 @@ pub mod reckoning {
             None
         }
 
-        fn resolve_entity_transfer(&self, _: &EntityId, _: &FamilyId) -> Result<(), EntityError> {
+        fn resolve_entity_transfer(&self, _: &EntityId, _: &FamilyId) -> Result<(), DbError> {
             todo!()
         }
     }
@@ -758,12 +931,20 @@ pub mod reckoning {
     mod transfer {
         use std::collections::HashMap;
         use std::sync::Arc;
-        use crate::id::FamilyId;
         use crate::database::reckoning::CType;
+        use super::FamilyId;
         
         #[derive(Clone)]
         pub struct TransferGraph {
             links: Arc<HashMap<CType, Edge>>,
+        }
+
+        impl TransferGraph {
+            pub fn new() -> Self {
+                Self {
+                    links: Arc::new(HashMap::new())
+                }
+            }
         }
         
         pub enum Edge {
@@ -1321,13 +1502,12 @@ pub mod reckoning {
             fn as_rows<'db, T>(db: &'db EntityDatabase) -> Rows<'db, T> {
                 
                 #![allow(unreachable_code, unused_variables)] todo!("actually get a family id set");
-                
-                let fs = FamilyIdSet::default();
-                crate::database::Rows {
-                    db,
-                    fs,
-                    marker: PhantomData::default(), 
-                }
+
+                //crate::database::Rows {
+                //    db,
+                //    fs,
+                //    marker: PhantomData::default(), 
+                //}
             }
 
             const READS: &'static [Option<ComponentType>];

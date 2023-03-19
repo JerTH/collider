@@ -21,6 +21,7 @@ pub(crate) enum ComponentDelta {
 
 /// A set of unique component types
 #[derive(Clone, Default, PartialEq, Eq, Hash, Debug)]
+#[deprecated]
 pub(crate) struct ComponentTypeSet(pub(crate) Arc<BTreeSet<ComponentType>>);
 
 

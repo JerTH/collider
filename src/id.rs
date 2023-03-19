@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 use std::fmt::Debug;
 
+
 #[derive(Copy, Clone)]
 pub union IdUnion {
     /// Interprets the id as (id, generation, _, flags)
@@ -37,6 +38,7 @@ pub(crate) struct ComponentId(pub(crate) IdUnion);
 /// 
 /// These are functionally the same as `EntityId`'s
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[deprecated]
 pub struct FamilyId(pub(crate) IdUnion);
 
 /// A stable `TypeId` which (should) be common across builds. This isn't a guarantee, especially
@@ -119,6 +121,7 @@ impl From<EntityId> for FamilyId {
         FamilyId(value.0)
     }
 }
+
 
 static STABLE_TYPE_ID_NAME_MAP: LazyLock<RwLock<HashMap<StableTypeId, &'static str>>>
     = LazyLock::new(|| RwLock::new(HashMap::new()));
