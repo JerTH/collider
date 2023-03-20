@@ -2,34 +2,76 @@
 
 #[macro_use]
 pub mod reckoning {
+    // misc
     use std::any::Any;
     use std::cell::UnsafeCell;
     use std::error::Error;
+    use std::fmt::Debug;
     use std::fmt::Display;
     use std::hash::Hash;
     use std::ptr::NonNull;
-    use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockWriteGuard, RwLockReadGuard};
-    use std::collections::{HashMap, BTreeSet, HashSet};
-    use std::sync::atomic::{Ordering, AtomicU32};
+
+    // sync
+    use std::sync::Arc;
+    use std::sync::RwLockWriteGuard;
+    use std::sync::RwLock;
+    use std::sync::PoisonError;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicU32;
+    use std::sync::atomic::Ordering;
+    
+    // collections
+    use std::collections::HashSet;
+    use std::collections::BTreeSet;
+    use std::collections::HashMap;
+
+    // crate
     use crate::EntityId;
     use crate::id::{StableTypeId, IdUnion};
 
+    // typedefs
     type CType = self::ComponentType;
     type CTypeSet = self::ComponentTypeSet;
+    type AnyPtr = Box<dyn Any>;
+    type CommutativeHashValue = u64;
+    type FamilyIdSetImpl = HashSet<FamilyId>; // INVARIANT: This type MUST NOT accept duplicates 
+    type FamilyIdSetInner = (CommutativeId, FamilyIdSetImpl);
     
     /// Borrowed
     /// 
     /// This module is responsible for safe, non-aliased, and concurrent access
     /// to table columns
     mod borrowed {
+        use std::cell::UnsafeCell;
+        use std::collections::HashMap;
         use std::marker::PhantomData;
         use std::ops::{Deref, DerefMut};
         use std::ptr::NonNull;
         use std::sync::atomic::{AtomicIsize, Ordering};
 
-        pub type BorrowSentinel = AtomicIsize;
+        use crate::EntityId;
+
+        use super::{AnyPtr, Component, DbError};
+
         const NOT_BORROWED: isize = 0isize;
         const MUTABLE_BORROW: isize = -1isize;
+
+        #[derive(Default)]
+        pub struct BorrowSentinel(AtomicIsize);
+
+        impl BorrowSentinel {
+            fn new() -> Self {
+                Default::default()
+            }
+        }
+
+        impl Deref for BorrowSentinel {
+            type Target = AtomicIsize;
+
+            fn deref(&self) -> &Self::Target {
+                &self.0
+            }
+        }
 
         #[inline]
         fn is_mut_borrow(value: isize) -> bool {
@@ -113,19 +155,21 @@ pub mod reckoning {
             AlreadyBorrowed,
         }
 
-        pub struct ColumnRef<'b, T> {
-            column: NonNull<Vec<T>>,
+        type ColumnType<C: Component> = Vec<C>;
+
+        pub struct ColumnRef<'b, C> {
+            column: NonNull<ColumnType<C>>,
             borrow: BorrowRef<'b>,
         }
 
-        impl<'b, T> ColumnRef<'b, T> {
-            pub fn new(column: NonNull<Vec<T>>, borrow: BorrowRef<'b>) -> Self {
+        impl<'b, C> ColumnRef<'b, C> {
+            pub fn new(column: NonNull<ColumnType<C>>, borrow: BorrowRef<'b>) -> Self {
                 Self { column, borrow }
             }
         }
 
-        impl<T> Deref for ColumnRef<'_, T> {
-            type Target = Vec<T>;
+        impl<C> Deref for ColumnRef<'_, C> {
+            type Target = ColumnType<C>;
 
             fn deref(&self) -> &Self::Target {
                 // SAFETY
@@ -134,9 +178,9 @@ pub mod reckoning {
             }
         }
 
-        impl<'b, T: 'b> IntoIterator for ColumnRef<'b, T> {
-            type Item = &'b T;
-            type IntoIter = ColumnIter<'b, T>;
+        impl<'b, C: 'b> IntoIterator for ColumnRef<'b, C> {
+            type Item = &'b C;
+            type IntoIter = ColumnIter<'b, C>;
 
             fn into_iter(self) -> Self::IntoIter {
                 let size = self.len();
@@ -149,15 +193,15 @@ pub mod reckoning {
             }
         }
         
-        pub struct ColumnIter<'b, T> {
-            column: &'b Vec<T>,
+        pub struct ColumnIter<'b, C> {
+            column: &'b ColumnType<C>,
             borrow: BorrowRef<'b>,
             size: usize,
             next: usize,
         }
         
-        impl<'b, T: 'b> Iterator for ColumnIter<'b, T> {
-            type Item = &'b T;
+        impl<'b, C: 'b> Iterator for ColumnIter<'b, C> {
+            type Item = &'b C;
             
             fn next(&mut self) -> Option<Self::Item> {
                 let val = self.column.get(self.next);
@@ -233,17 +277,97 @@ pub mod reckoning {
                 unsafe { std::mem::transmute::<Option<&mut T>, Option<&'b mut T>>(val) }
             }
         }
+
+        /// The owner of the actual data we are interested in. 
+        #[derive(Default)]
+        pub struct Column<C: Component> {
+            /// INVARIANT: 
+            /// 
+            /// For an entity in a table, its associated components must
+            /// always occupy the same index in each column. Failure to
+            /// uphold this invariant will result in undefined behavior
+            /// contained to the entities in the affected column
+            values: UnsafeCell<Vec<C>>,
+            borrow: BorrowSentinel,
+        }
+        
+        impl<'b, C: Component> Column<C> {
+            fn new() -> Self {
+                Self {
+                    values: UnsafeCell::new(Vec::new()),
+                    borrow: BorrowSentinel::new(),
+                }
+            }
+            
+            pub fn borrow(&'b self) -> ColumnRef<'b, C> {
+                self.try_borrow().expect("column was already mutably borrowed")
+            }
+        
+            fn try_borrow(&'b self) -> Result<ColumnRef<'b, C>, BorrowError> {
+                match BorrowRef::new(&self.borrow) {
+                    Some(borrow) => {
+                        let column = unsafe {
+                            NonNull::new_unchecked(self.values.get())
+                        };
+                        Ok(ColumnRef::new(column, borrow))
+                    },
+                    None => {
+                        Err(BorrowError::AlreadyBorrowed)
+                    },
+                }
+            }
+            
+            pub fn borrow_mut(&'b self) -> ColumnRefMut<'b, C> {
+                self.try_borrow_mut().expect("column was already borrowed")
+            }
+        
+            fn try_borrow_mut(&'b self) -> Result<ColumnRefMut<'b, C>, BorrowError> {
+                match BorrowRefMut::new(&self.borrow) {
+                    Some(borrow) => {
+                        let column = unsafe {
+                            NonNull::new_unchecked(self.values.get())
+                        };
+                        Ok(ColumnRefMut::new(column, borrow))
+                    },
+                    None => {
+                        Err(BorrowError::AlreadyBorrowed)
+                    },
+                }
+            }
+            
+            /// Moves a single component from one [Column] to another, if they are the same type
+            fn dynamic_move(index: usize, from: &mut AnyPtr, dest: &mut AnyPtr)
+                -> Result<usize, DbError> {
+                let mut from = from.downcast_mut::<Column<C>>()
+                    .ok_or(DbError::ColumnDiscrepancy)?.borrow_mut();
+                let mut dest = dest.downcast_mut::<Column<C>>()
+                    .ok_or(DbError::ColumnDiscrepancy)?.borrow_mut();
+                
+                #[cfg(debug_assertions)]
+                if !(from.len() > index) {
+                    return Err(DbError::ColumnAccessOutOfBounds);
+                }
+                
+                let component = from.remove(index);
+                dest.push(component);
+                Ok(dest.len())
+            }
+            
+            /// Constructs a [Column] and returns a type erased pointer to it
+            fn dynamic_ctor() -> AnyPtr {
+                Box::new(Column::<C>::new())
+            }
+        }
     } // borrowed ======================================================================
     use borrowed::*;
-    use self::transfer::TransferGraph;
+    use transfer::TransferGraph;
     
-    type CommutativeHashType = u64;
-    const COMMUTATIVE_HASH_TYPE_ZERO: CommutativeHashType = 0 as CommutativeHashType;
-    const COMMUTATIVE_HASH_PRIME: CommutativeHashType = 0x29233AAB26330D; // 11579208931619597
+    const COMMUTATIVE_HASH_TYPE_ZERO: CommutativeHashValue = 0 as CommutativeHashValue;
+    const COMMUTATIVE_HASH_PRIME: CommutativeHashValue = 0x29233AAB26330D; // 11579208931619597
 
     /// [CommutativeId]
     #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    struct CommutativeId(CommutativeHashType);
+    struct CommutativeId(CommutativeHashValue);
     const COMMUTATIVE_ID_INIT: CommutativeId = CommutativeId(COMMUTATIVE_HASH_PRIME);
 
     impl CommutativeId {
@@ -277,83 +401,30 @@ pub mod reckoning {
         }
     }
 
-    impl FromIterator<CommutativeHashType> for CommutativeId {
-        fn from_iter<T: IntoIterator<Item = CommutativeHashType>>(iter: T) -> Self {
+    impl FromIterator<CommutativeHashValue> for CommutativeId {
+        fn from_iter<T: IntoIterator<Item = CommutativeHashValue>>(iter: T) -> Self {
             iter.into_iter().fold(COMMUTATIVE_ID_INIT, |acc, x| {
                 CommutativeId::combine(&acc, &CommutativeId(x)); acc
             })
         }
     }
 
-    impl<'i> FromIterator<&'i CommutativeHashType> for CommutativeId {
-        fn from_iter<T: IntoIterator<Item = &'i CommutativeHashType>>(iter: T) -> Self {
+    impl<'i> FromIterator<&'i CommutativeHashValue> for CommutativeId {
+        fn from_iter<T: IntoIterator<Item = &'i CommutativeHashValue>>(iter: T) -> Self {
             iter.into_iter().fold(COMMUTATIVE_ID_INIT, |acc, x| {
                 CommutativeId::combine(&acc, &CommutativeId(*x)); acc
             })
         }
     }
 
-    pub trait Component: 'static {}
-
-    /// The owner of the actual data we are interested in. 
-    #[derive(Default)]
-    pub struct Column<T: Component> {
-        /// INVARIANT: 
-        /// 
-        /// For an entity in a table, its associated components must
-        /// always occupy the same index in each column. Failure to
-        /// uphold this invariant will result in undefined behavior
-        /// contained to the entities in the affected column
-        values: UnsafeCell<Vec<T>>,
-        borrow: BorrowSentinel,
-    }
-    
-    impl<'b, T: Component> Column<T> {
-        pub fn borrow(&'b self) -> ColumnRef<'b, T> {
-            self.try_borrow().expect("column was already mutably borrowed")
-        }
-
-        fn try_borrow(&'b self) -> Result<ColumnRef<'b, T>, BorrowError> {
-            match BorrowRef::new(&self.borrow) {
-                Some(borrow) => {
-                    let column = unsafe {
-                        NonNull::new_unchecked(self.values.get())
-                    };
-                    Ok(ColumnRef::new(column, borrow))
-                },
-                None => {
-                    Err(BorrowError::AlreadyBorrowed)
-                },
-            }
-        }
-        
-        pub fn borrow_mut(&'b self) -> ColumnRefMut<'b, T> {
-            self.try_borrow_mut().expect("column was already borrowed")
-        }
-
-        fn try_borrow_mut(&'b self) -> Result<ColumnRefMut<'b, T>, BorrowError> {
-            match BorrowRefMut::new(&self.borrow) {
-                Some(borrow) => {
-                    let column = unsafe {
-                        NonNull::new_unchecked(self.values.get())
-                    };
-                    Ok(ColumnRefMut::new(column, borrow))
-                },
-                None => {
-                    Err(BorrowError::AlreadyBorrowed)
-                },
-            }
-        }
-    }
-
-    type AnyPtr = Box<dyn Any>;
+    pub trait Component: Debug + 'static {}
 
     /// Type erased entry into a table which describes a single column
     pub struct TableEntry {
-        tyid: StableTypeId, // The type id of [data]
-        data: AnyPtr, // Column<T>
-        mvfn: fn(&EntityId, AnyPtr, AnyPtr),
+        tyid: StableTypeId, // The type id of Column<T>  ([Self::data])
         ctor: fn() -> AnyPtr,
+        mvfn: fn(&EntityId, AnyPtr, AnyPtr),
+        data: AnyPtr, // Column<T>
     }
     
     impl<'b> TableEntry {
@@ -468,15 +539,16 @@ pub mod reckoning {
         }
     }
 
-    impl Component for () {}
-    fn foo() {
-        let maps = DbMaps::new();
-        let cty = ComponentType::of::<()>();
-        let set = maps.get::<(CType, FamilyIdSet)>(&cty);
-    }
-
     /// Contains several maps used to cache relationships between
-    /// data in the [EntityDatabase]
+    /// data in the [EntityDatabase]. The data in [DbMaps] is
+    /// intended to be cross-cutting, and of a higher order than
+    /// data stored in components
+    /// 
+    /// The tradeoff we're after here is to do a lot of work up-front when
+    /// dealing with components and how they relate to one another. The
+    /// strategy is to cache and record all of the informaiton about
+    /// families at their creation, and then use that information to
+    /// accelerate interactions with the [EntityDatabase]
     pub struct DbMaps {
         component_group_to_family:      RwLock<HashMap<CTypeSet, FamilyId>>,
         entity_to_owning_family:        RwLock<HashMap<EntityId, FamilyId>>,
@@ -484,6 +556,10 @@ pub mod reckoning {
         families_containing_set:        RwLock<HashMap<CTypeSet, FamilyIdSet>>,
         components_of_family:           RwLock<HashMap<FamilyId, CTypeSet>>,
         transfer_graph_of_family:       RwLock<HashMap<FamilyId, TransferGraph>>,
+
+        // TODO: The traits that back DbMaps are designed to make
+        // extensibility possible, dynamic mappings/extensions are
+        // a future addition to be explored
     }
     
     impl<'db> DbMaps {
@@ -582,13 +658,10 @@ pub mod reckoning {
         }
     }
 
-    type FamilyIdSetType = HashSet<FamilyId>;
-    type FamilyIdSetInnerType = (CommutativeId, FamilyIdSetType);
-
     /// An immutable set of family id's
     #[derive(Clone)]
     pub struct FamilyIdSet {
-        ptr: Arc<FamilyIdSetInnerType>, // thread-local?
+        ptr: Arc<FamilyIdSetInner>, // thread-local?
     }
 
     impl FamilyIdSet {
@@ -603,7 +676,7 @@ pub mod reckoning {
 
     impl<'i> FromIterator<FamilyId> for FamilyIdSet {
         fn from_iter<I: IntoIterator<Item = FamilyId>>(iter: I) -> Self {
-            let set: FamilyIdSetType = iter.into_iter().collect();
+            let set: FamilyIdSetImpl = iter.into_iter().collect();
             let set_id = CommutativeId::from_iter(set.iter().map(|id| id.0));
             FamilyIdSet { ptr: Arc::new((set_id, set)) }
         }
@@ -721,6 +794,8 @@ pub mod reckoning {
         FailedToFindFamily,
         EntityBelongsToUnknownFamily,
         FailedToAcquireMapping,
+        ColumnDiscrepancy,
+        ColumnAccessOutOfBounds,
     }
 
     impl Display for DbError {
@@ -740,6 +815,12 @@ pub mod reckoning {
                 },
                 DbError::FailedToAcquireMapping => {
                     write!(f, "failed to acquire requested mapping")
+                },
+                DbError::ColumnDiscrepancy => {
+                    write!(f, "column type mismatch")
+                },
+                DbError::ColumnAccessOutOfBounds => {
+                    write!(f, "attempted to index a column out of bounds")
                 },
             }
         }
@@ -770,12 +851,13 @@ pub mod reckoning {
         }
 
         /// Adds a [Component] to an entity
-        pub fn add_component<C: Component>(&mut self, entity: EntityId, _: C) -> Result<(), DbError> {
+        pub fn add_component<C: Component>(&mut self, entity: EntityId, component: C) -> Result<(), DbError> {
             let cty = ComponentType::of::<C>();
             let delta = ComponentDelta::Add(cty);
 
             let family = self.find_new_family(&entity, &delta)?;
             self.resolve_entity_transfer(&entity, &family)?;
+            self.replace_real_component(&entity, component);
             
             Ok(())
         }
@@ -802,7 +884,7 @@ pub mod reckoning {
             
             todo!()
         }
-        
+
         /// Computes the destination family for a given entity, after
         /// a component addition or removal
         fn find_new_family(&self, entity: &EntityId, delta: &ComponentDelta)
@@ -813,15 +895,15 @@ pub mod reckoning {
 
             match delta {
                 ComponentDelta::Add(component) => {
-                    self.family_after_add(&family, entity, component)
+                    self.family_after_add(&family, component)
                 },
                 ComponentDelta::Rem(component) => {
-                    self.family_after_remove(&family, entity, component)
+                    self.family_after_remove(&family, component)
                 },
             }
         }
 
-        fn family_after_add(&self, current: &FamilyId, entity: &EntityId, component: &ComponentType)
+        fn family_after_add(&self, current: &FamilyId, component: &ComponentType)
         -> Result<FamilyId, DbError> {
             match self.query_transfer_graph(current, component) {
                 Some(edge) => {
@@ -852,7 +934,7 @@ pub mod reckoning {
             }
         }
 
-        fn family_after_remove(&self, _: &FamilyId, _: &EntityId, _: &ComponentType) -> Result<FamilyId, DbError> {
+        fn family_after_remove(&self, _: &FamilyId, _: &ComponentType) -> Result<FamilyId, DbError> {
             todo!()
         }
 
@@ -860,6 +942,13 @@ pub mod reckoning {
         fn new_family(&self, components: ComponentTypeSet) -> Result<FamilyId, DbError> {
             let id = FamilyId::from_iter(components.iter());
             
+            // component_group_to_family:      RwLock<HashMap<CTypeSet, FamilyId>>,
+            // entity_to_owning_family:        RwLock<HashMap<EntityId, FamilyId>>,
+            // families_containing_component:  RwLock<HashMap<CType,    FamilyIdSet>>,
+            // families_containing_set:        RwLock<HashMap<CTypeSet, FamilyIdSet>>,
+            // components_of_family:           RwLock<HashMap<FamilyId, CTypeSet>>,
+            // transfer_graph_of_family:       RwLock<HashMap<FamilyId, TransferGraph>>,
+
             // We map each family to the set of components it represents
             {
                 let mut guard = self.maps
@@ -905,14 +994,19 @@ pub mod reckoning {
                 }
             }
 
-            todo!()
+            Ok(id)
         }
 
-        fn query_transfer_graph(&self, _: &FamilyId, _: &ComponentType) -> Option<transfer::Edge> {
-            None
+        fn query_transfer_graph(&self, family: &FamilyId, component: &ComponentType) -> Option<transfer::Edge> {
+            self.maps.get::<(FamilyId, TransferGraph)>(family)
+                .and_then(|graph| graph.get(component))
         }
 
         fn resolve_entity_transfer(&self, _: &EntityId, _: &FamilyId) -> Result<(), DbError> {
+            todo!()
+        }
+
+        fn replace_real_component<C: Component>(&self, _: &EntityId, _: C) -> Result<(), DbError> {
             todo!()
         }
     }
@@ -933,6 +1027,7 @@ pub mod reckoning {
         use std::sync::Arc;
         use crate::database::reckoning::CType;
         use super::FamilyId;
+        use super::ComponentType;
         
         #[derive(Clone)]
         pub struct TransferGraph {
@@ -945,8 +1040,13 @@ pub mod reckoning {
                     links: Arc::new(HashMap::new())
                 }
             }
+
+            pub fn get(&self, component: &ComponentType) -> Option<Edge> {
+                self.links.get(component).cloned()
+            }
         }
         
+        #[derive(Clone)]
         pub enum Edge {
             Add(FamilyId),
             Remove(FamilyId),
@@ -1322,8 +1422,8 @@ pub mod reckoning {
         use crate::database::ComponentType;
         use crate::database::ConflictGraph;
         use crate::database::Dependent;
-        use crate::id::FamilyId;
 
+        use super::FamilyId;
         use super::FamilyIdSet;
         use super::Component;
         use super::EntityDatabase;
@@ -1696,6 +1796,7 @@ mod vehicle_example {
     }
     impl Component for Transmission {}
 
+    #[derive(Debug)]
     pub enum Driver {
         SlowAndSteady,
         PedalToTheMetal,
