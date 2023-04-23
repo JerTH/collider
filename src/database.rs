@@ -455,6 +455,33 @@ pub mod reckoning {
         freerow: usize,
         size: usize,
     }
+    
+    impl Table {
+        fn set_component<C: Component>(
+            &self,
+            entity: &EntityId,
+            component: C
+        ) -> Result<(), DbError>
+        {
+            let component_type = ComponentType::of::<C>();
+
+            let index = *self.entitym.get(entity)
+                .ok_or(DbError::EntityDoesntExist)?;
+            
+            let entry = self.columns.get(&component_type)
+                .ok_or(DbError::ColumnDoesntExist)?;
+            
+            let column = entry.data.downcast_ref::<Column<C>>()
+                .ok_or(DbError::ColumnDiscrepancy)?;
+            
+            // Borrow the column, panics if it is already borrowed
+            let mut column_ref = column.borrow_mut();
+
+            column_ref[index] = component;
+
+            Ok(())
+        }
+    }
 
     pub trait DbMapping<'db> {
         type Guard;
@@ -786,7 +813,7 @@ pub mod reckoning {
             CreateEntityError::IdAllocatorError
         }
     }
-
+    
     #[derive(Debug)]
     pub enum DbError {
         EntityDoesntExist,
@@ -796,7 +823,11 @@ pub mod reckoning {
         FailedToAcquireMapping,
         ColumnDiscrepancy,
         ColumnAccessOutOfBounds,
+        TableDoesntExist,
+        ColumnDoesntExist,
     }
+
+    impl Error for DbError {}
 
     impl Display for DbError {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -822,12 +853,16 @@ pub mod reckoning {
                 DbError::ColumnAccessOutOfBounds => {
                     write!(f, "attempted to index a column out of bounds")
                 },
+                DbError::TableDoesntExist => {
+                    write!(f, "table doesn't exist for the given family id")
+                },
+                DbError::ColumnDoesntExist => {
+                    write!(f, "column doesn't exist in the given table")
+                },
             }
         }
     }
     
-    impl Error for DbError {}
-
     pub struct EntityDatabase {
         allocator: EntityAllocator,
         tables: HashMap<FamilyId, Table>,
@@ -846,22 +881,28 @@ pub mod reckoning {
 
         /// Creates an entity, returning its [EntityId]
         pub fn create(&self) -> Result<EntityId, CreateEntityError> {
-            let id = self.allocator.alloc()?;
-            Ok(id)
+            self.allocator.alloc().map_err(|_| {
+                CreateEntityError::IdAllocatorError
+            })
         }
 
         /// Adds a [Component] to an entity
-        pub fn add_component<C: Component>(&mut self, entity: EntityId, component: C) -> Result<(), DbError> {
+        pub fn add_component<C: Component>(
+            &mut self,
+            entity: EntityId,
+            component: C
+        ) -> Result<(), DbError>
+        {
             let cty = ComponentType::of::<C>();
             let delta = ComponentDelta::Add(cty);
 
             let family = self.find_new_family(&entity, &delta)?;
             self.resolve_entity_transfer(&entity, &family)?;
-            self.replace_real_component(&entity, component);
+            self.replace_real_component(&entity, component)?;
             
             Ok(())
         }
-
+        
         /// Adds a single instance of a global component to the [EntityDatabase]
         /// A global component only ever has one instance, and is accessible by
         /// any system with standard Read/Write rules. Typical uses for a global
@@ -887,8 +928,11 @@ pub mod reckoning {
 
         /// Computes the destination family for a given entity, after
         /// a component addition or removal
-        fn find_new_family(&self, entity: &EntityId, delta: &ComponentDelta)
-        -> Result<FamilyId, DbError> {
+        fn find_new_family(
+            &self,
+            entity: &EntityId,
+            delta: &ComponentDelta
+        ) -> Result<FamilyId, DbError> {
             let family = self.maps
                 .get::<(EntityId, FamilyId)>(entity)
                 .ok_or(DbError::EntityDoesntExist)?;
@@ -903,8 +947,11 @@ pub mod reckoning {
             }
         }
 
-        fn family_after_add(&self, current: &FamilyId, component: &ComponentType)
-        -> Result<FamilyId, DbError> {
+        fn family_after_add(
+            &self,
+            current: &FamilyId,
+            component: &ComponentType
+        ) -> Result<FamilyId, DbError> {
             match self.query_transfer_graph(current, component) {
                 Some(edge) => {
                     if let transfer::Edge::Add(family_id) = edge {
@@ -921,7 +968,12 @@ pub mod reckoning {
             if components.contains(&component) {
                 return Ok(*current)
             } else {
-                let new_components_iter = components.iter().cloned().chain([*component]);
+                let new_components_iter =
+                    components
+                    .iter()
+                    .cloned()
+                    .chain([*component]);
+
                 let new_components = ComponentTypeSet::from_iter(new_components_iter);
                 let family = self.maps
                     .get::<(ComponentTypeSet, FamilyId)>(&new_components);
@@ -934,12 +986,21 @@ pub mod reckoning {
             }
         }
 
-        fn family_after_remove(&self, _: &FamilyId, _: &ComponentType) -> Result<FamilyId, DbError> {
+        /// Computes or creates the resultant family after a component is
+        /// removed from 
+        fn family_after_remove(
+            &self,
+            _: &FamilyId,
+            _: &ComponentType
+        ) -> Result<FamilyId, DbError> {
             todo!()
         }
 
         /// Creates a new family, sets up the default db mappings for the family
-        fn new_family(&self, components: ComponentTypeSet) -> Result<FamilyId, DbError> {
+        fn new_family(
+            &self,
+            components: ComponentTypeSet
+        ) -> Result<FamilyId, DbError> {
             let id = FamilyId::from_iter(components.iter());
             
             // component_group_to_family:      RwLock<HashMap<CTypeSet, FamilyId>>,
@@ -997,17 +1058,35 @@ pub mod reckoning {
             Ok(id)
         }
 
-        fn query_transfer_graph(&self, family: &FamilyId, component: &ComponentType) -> Option<transfer::Edge> {
+        fn query_transfer_graph(
+            &self,
+            family: &FamilyId,
+            component: &ComponentType
+        ) -> Option<transfer::Edge> {
             self.maps.get::<(FamilyId, TransferGraph)>(family)
                 .and_then(|graph| graph.get(component))
         }
 
-        fn resolve_entity_transfer(&self, _: &EntityId, _: &FamilyId) -> Result<(), DbError> {
+        fn resolve_entity_transfer(
+            &self,
+            _: &EntityId,
+            _: &FamilyId
+        ) -> Result<(), DbError> {
             todo!()
         }
 
-        fn replace_real_component<C: Component>(&self, _: &EntityId, _: C) -> Result<(), DbError> {
-            todo!()
+        fn replace_real_component<C: Component>(
+            &self,
+            entity: &EntityId,
+            component: C
+        ) -> Result<(), DbError> {
+            let family = self.maps.get::<(EntityId, FamilyId)>(entity)
+                .ok_or(DbError::EntityBelongsToUnknownFamily)?;
+            let table = self.tables.get(&family)
+                .ok_or(DbError::TableDoesntExist)?;
+            table.set_component(entity, component)?;
+
+            Ok(())
         }
     }
 
@@ -1925,6 +2004,70 @@ mod vehicle_example {
 
             break;
         }
+    }
+}
+
+mod creature_example {
+    use super::reckoning::*;
+
+    trait Metabolizable {}
+
+    /// The state of the creatures bloodstream,
+    /// including total blood, dilation, blockage
+    struct Bloodstream {
+        /// The total volume of blood present
+        /// arteries contain 10-15%, veins 70%
+        volume: u32,
+        
+        /// The status of the blood vessels.
+        /// Values represent major regions,
+        /// vessels can be blocked, dilated,
+        /// constricted, severed, etc.
+        /// 0: Aorta
+        vessels: [u8; 12],
+        
+        /// The volumes of things in the bloodstream
+        content: Vec<Box<dyn Metabolizable>>,
+    }
+
+    /// A single kidney
+    struct Kidney {
+        /// The filtration efficiency of this kidney
+        filtration: u8,
+    }
+
+    struct Lung {
+        capacity: u16,
+    }
+
+    struct Heart {
+        frequency: u16,
+    }
+
+    /// The state of the creatures vital organs,
+    /// e.g. Heart, Lungs, Liver, Kidneys
+    struct VitalOrgans {
+        lhs_kidney: Option<Kidney>,
+        rhs_kidney: Option<Kidney>,
+        lhs_lung: Option<Lung>,
+        rhs_lung: Option<Lung>,
+        heart: Option<Heart>,
+    }
+
+    /// The state of the creatures muscles,
+    /// muscles need oxygenated blood,
+    /// the creature can't move without muscles
+    struct Muscles;
+    /// The state of the creatures brain
+    struct Brain;
+    /// The creatures mind, acts as a blackboard for
+    /// an associated AI, remembers things, it usually
+    /// needs a brain or brain-like thing to work
+    struct Mind;
+
+    #[test]
+    fn creature_example() {
+
     }
 }
 
