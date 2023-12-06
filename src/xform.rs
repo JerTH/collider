@@ -5,8 +5,6 @@ use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::marker::PhantomData;
 
-use ouroboros::self_referencing;
-
 use crate::EntityId;
 use crate::db::DataTableGuard;
 use crate::db::EntityDatabase;

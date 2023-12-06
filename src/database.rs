@@ -2,14 +2,15 @@
 
 #[macro_use]
 pub mod reckoning {
+    use core::fmt;
     // misc
     use std::any::Any;
-    use std::cell::UnsafeCell;
+    use std::any::type_name;
+    use std::borrow::BorrowMut;
     use std::error::Error;
     use std::fmt::Debug;
     use std::fmt::Display;
     use std::hash::Hash;
-    use std::ptr::NonNull;
 
     // sync
     use std::sync::Arc;
@@ -320,7 +321,7 @@ pub mod reckoning {
             pub fn borrow_mut(&'b self) -> ColumnRefMut<'b, C> {
                 self.try_borrow_mut().expect("column was already borrowed")
             }
-        
+            
             fn try_borrow_mut(&'b self) -> Result<ColumnRefMut<'b, C>, BorrowError> {
                 match BorrowRefMut::new(&self.borrow) {
                     Some(borrow) => {
@@ -339,9 +340,9 @@ pub mod reckoning {
             fn dynamic_move(index: usize, from: &mut AnyPtr, dest: &mut AnyPtr)
                 -> Result<usize, DbError> {
                 let mut from = from.downcast_mut::<Column<C>>()
-                    .ok_or(DbError::ColumnDiscrepancy)?.borrow_mut();
+                    .ok_or(DbError::ColumnTypeDiscrepancy)?.borrow_mut();
                 let mut dest = dest.downcast_mut::<Column<C>>()
-                    .ok_or(DbError::ColumnDiscrepancy)?.borrow_mut();
+                    .ok_or(DbError::ColumnTypeDiscrepancy)?.borrow_mut();
                 
                 #[cfg(debug_assertions)]
                 if !(from.len() > index) {
@@ -396,7 +397,7 @@ pub mod reckoning {
     impl FromIterator<CommutativeId> for CommutativeId {
         fn from_iter<T: IntoIterator<Item = CommutativeId>>(iter: T) -> Self {
             iter.into_iter().fold(COMMUTATIVE_ID_INIT, |acc, x| {
-                CommutativeId::combine(&acc, &x); acc
+                CommutativeId::combine(&acc, &x)
             })
         }
     }
@@ -404,7 +405,7 @@ pub mod reckoning {
     impl FromIterator<CommutativeHashValue> for CommutativeId {
         fn from_iter<T: IntoIterator<Item = CommutativeHashValue>>(iter: T) -> Self {
             iter.into_iter().fold(COMMUTATIVE_ID_INIT, |acc, x| {
-                CommutativeId::combine(&acc, &CommutativeId(x)); acc
+                CommutativeId::combine(&acc, &CommutativeId(x))
             })
         }
     }
@@ -412,24 +413,49 @@ pub mod reckoning {
     impl<'i> FromIterator<&'i CommutativeHashValue> for CommutativeId {
         fn from_iter<T: IntoIterator<Item = &'i CommutativeHashValue>>(iter: T) -> Self {
             iter.into_iter().fold(COMMUTATIVE_ID_INIT, |acc, x| {
-                CommutativeId::combine(&acc, &CommutativeId(*x)); acc
+                CommutativeId::combine(&acc, &CommutativeId(*x))
             })
         }
     }
 
+    #[test]
+    fn test_commutative_id() {
+        let iter_a = [StableTypeId::of::<f32>(), StableTypeId::of::<f64>()];
+        let iter_aa = [StableTypeId::of::<f64>(), StableTypeId::of::<f32>()];
+        let iter_b = [StableTypeId::of::<i8>(), StableTypeId::of::<i16>()];
+        let iter_c = [StableTypeId::of::<i8>(), StableTypeId::of::<i16>(), StableTypeId::of::<i32>()];
+        let id_a = CommutativeId::from_iter(iter_a.into_iter().map(|i| i.0));
+        let id_aa = CommutativeId::from_iter(iter_aa.into_iter().map(|i| i.0));
+        let id_b = CommutativeId::from_iter(iter_b.into_iter().map(|i| i.0));
+        let id_c = CommutativeId::from_iter(iter_c.into_iter().map(|i| i.0));
+        
+        assert_ne!(id_a, id_b);
+        assert_ne!(id_a, id_c);
+        assert_ne!(id_b, id_c);
+
+        assert_eq!(id_a, id_aa)
+    }
+
     pub trait Component: Debug + 'static {}
+    
+    /// Component implementation for the unit type
+    /// Every entity automatically gets this component upon creation
+    impl Component for () {}
 
     /// Type erased entry into a table which describes a single column
+    /// A column contains one type of component. An single index into a table describes 
+    /// an entity made up of different components in different columns
     pub struct TableEntry {
         tyid: StableTypeId, // The type id of Column<T>  ([Self::data])
         ctor: fn() -> AnyPtr,
-        mvfn: fn(&EntityId, AnyPtr, AnyPtr),
+        mvfn: fn(&EntityId, usize, &AnyPtr, &AnyPtr),
         data: AnyPtr, // Column<T>
     }
     
     impl<'b> TableEntry {
         pub fn iter<T: Component>(&'b self) -> borrowed::ColumnIter<'b, T> {
             debug_assert!(StableTypeId::of::<T>() == self.tyid);
+
             let column = self.data.downcast_ref::<Column<T>>()
                 .expect("expected matching column types");
             let column_ref = column.borrow();
@@ -438,8 +464,9 @@ pub mod reckoning {
             column_iter
         }
         
-        fn iter_mut<T: Component>(&'b self) -> borrowed::ColumnIterMut<'b, T> {
+        pub fn iter_mut<T: Component>(&'b self) -> borrowed::ColumnIterMut<'b, T> {
             debug_assert!(StableTypeId::of::<T>() == self.tyid);
+
             let column = self.data.downcast_ref::<Column<T>>()
                 .expect("expected matching column types");
             let column_mut = column.borrow_mut();
@@ -450,13 +477,33 @@ pub mod reckoning {
     }
 
     pub struct Table {
-        columns: Arc<HashMap<CType, TableEntry>>,
-        entitym: HashMap<EntityId, usize>,
-        freerow: usize,
-        size: usize,
+        family: FamilyId,
+        columns: HashMap<CType, TableEntry>,
+        entitym: RwLock<HashMap<EntityId, usize>>,
+        freerow: Option<usize>,
+        size: usize, // this should be equal to entitym.len()
     }
     
     impl Table {
+        fn new(family: FamilyId) -> Self {
+            Table {
+                family: family,
+                columns: HashMap::new(),
+                entitym: RwLock::new(HashMap::new()),
+                freerow: None,
+                size: 0,
+            }
+        }
+
+        /// Gets the index of the next free row in the table
+        /// expanding the table if necessary
+        fn get_next_free_row(&self) -> usize {
+            // Do we already have a next free row?
+            if let Some(next) = self.freerow {
+
+            }
+        }
+
         fn set_component<C: Component>(
             &self,
             entity: &EntityId,
@@ -465,14 +512,14 @@ pub mod reckoning {
         {
             let component_type = ComponentType::of::<C>();
 
-            let index = *self.entitym.get(entity)
-                .ok_or(DbError::EntityDoesntExist)?;
+            let index = *self.entitym.read().expect("unable to read table entity map").get(entity)
+                .ok_or(DbError::EntityNotInTable(*entity, self.family))?;
             
             let entry = self.columns.get(&component_type)
-                .ok_or(DbError::ColumnDoesntExist)?;
+                .ok_or(DbError::ColumnDoesntExistInTable)?;
             
             let column = entry.data.downcast_ref::<Column<C>>()
-                .ok_or(DbError::ColumnDiscrepancy)?;
+                .ok_or(DbError::ColumnTypeDiscrepancy)?;
             
             // Borrow the column, panics if it is already borrowed
             let mut column_ref = column.borrow_mut();
@@ -480,6 +527,10 @@ pub mod reckoning {
             column_ref[index] = component;
 
             Ok(())
+        }
+
+        fn move_row(row: &EntityId, dest: &Table) {
+            //for component in self.
         }
     }
 
@@ -606,7 +657,7 @@ pub mod reckoning {
         /// Returned values are deliberately copied/cloned, rather than
         /// referenced. This is to avoid issues of long-lived references
         /// and so synchronization primitives are held for the shortest
-        /// time possible. As such, it is encourage to only map to small
+        /// time possible. As such, it is encouraged to only map to small
         /// values, or, large values stored behind a reference counted
         /// pointer
         pub fn get<M>(&self, from: &M::From) -> Option<M::To>
@@ -621,8 +672,8 @@ pub mod reckoning {
         pub fn mut_map<M: DbMapping<'db>>(&'db self) -> Option<M::Guard>
         where
             M: DbMapping<'db>,
-            Self: GetDbMap<'db, M>,
             M::Map: 'db,
+            Self: GetDbMap<'db, M>,
         {
             <Self as GetDbMap<'db, M>>::mut_map(&self)
         }
@@ -633,7 +684,13 @@ pub mod reckoning {
 
     impl ComponentType {
         const fn of<C: Component>() -> Self {
-            Self(StableTypeId::of::<Self>())
+            Self(StableTypeId::of::<C>())
+        }
+    }
+
+    impl Display for ComponentType {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self.0.name().unwrap_or("{unknown}"))
         }
     }
 
@@ -650,6 +707,20 @@ pub mod reckoning {
 
         fn iter(&self) -> impl Iterator<Item = &CType> {
             self.ptr.iter()
+        }
+
+        fn names(&self) -> String {
+            let out = self.ptr.iter().fold(String::new(), |out, c| out + &String::from(format!("{}, ", c)));
+            format!("[{}]", out.trim_end_matches([' ', ',']))
+        }
+    }
+
+    impl Display for ComponentTypeSet {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            for ty in self.ptr.iter() {
+                write!(f, "{:?}", ty)?;
+            }
+            Ok(())
         }
     }
 
@@ -796,12 +867,14 @@ pub mod reckoning {
     #[derive(Debug)]
     pub enum CreateEntityError {
         IdAllocatorError,
+        DbError(DbError),
     }
 
     impl Display for CreateEntityError {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
                 CreateEntityError::IdAllocatorError => write!(f, "entity id allocation error"),
+                CreateEntityError::DbError(err) => write!(f, "database error while creating entity: {}", err),
             }
         }
     }
@@ -816,15 +889,18 @@ pub mod reckoning {
     
     #[derive(Debug)]
     pub enum DbError {
-        EntityDoesntExist,
+        EntityDoesntExist(EntityId),
         FailedToResolveTransfer,
-        FailedToFindFamily,
+        FailedToFindEntityFamily(EntityId),
+        FailedToFindFamilyForSet(ComponentTypeSet),
         EntityBelongsToUnknownFamily,
         FailedToAcquireMapping,
-        ColumnDiscrepancy,
+        ColumnTypeDiscrepancy,
         ColumnAccessOutOfBounds,
-        TableDoesntExist,
-        ColumnDoesntExist,
+        TableDoesntExistForFamily(FamilyId),
+        ColumnDoesntExistInTable,
+        EntityNotInTable(EntityId, FamilyId),
+        UnableToAcquireTablesLock(String),
     }
 
     impl Error for DbError {}
@@ -832,14 +908,17 @@ pub mod reckoning {
     impl Display for DbError {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
-                DbError::EntityDoesntExist => {
-                    write!(f, "entity doesn't exist")
+                DbError::EntityDoesntExist(entity) => {
+                    write!(f, "entity {:?} doesn't exist", entity)
                 },
                 DbError::FailedToResolveTransfer => {
                     write!(f, "failed to transfer entity between families")
                 },
-                DbError::FailedToFindFamily => {
-                    write!(f, "failed to find a new family for this entity")
+                DbError::FailedToFindEntityFamily(entity) => {
+                    write!(f, "failed to find a family for entity {:?}", entity)
+                },
+                DbError::FailedToFindFamilyForSet(set) => {
+                    write!(f, "failed to find a family for the set of components {}", set)
                 },
                 DbError::EntityBelongsToUnknownFamily => {
                     write!(f, "requested family data is unknown or invalid")
@@ -847,17 +926,23 @@ pub mod reckoning {
                 DbError::FailedToAcquireMapping => {
                     write!(f, "failed to acquire requested mapping")
                 },
-                DbError::ColumnDiscrepancy => {
+                DbError::ColumnTypeDiscrepancy => {
                     write!(f, "column type mismatch")
                 },
                 DbError::ColumnAccessOutOfBounds => {
                     write!(f, "attempted to index a column out of bounds")
                 },
-                DbError::TableDoesntExist => {
+                DbError::TableDoesntExistForFamily(family) => {
                     write!(f, "table doesn't exist for the given family id")
                 },
-                DbError::ColumnDoesntExist => {
+                DbError::ColumnDoesntExistInTable => {
                     write!(f, "column doesn't exist in the given table")
+                },
+                DbError::EntityNotInTable(entity, family) => {
+                    write!(f, "{:?} does not exist in {:?} data table", entity, family)
+                },
+                DbError::UnableToAcquireTablesLock(reason) => {
+                    write!(f, "unable to acquire master table lock: {}", reason)
                 },
             }
         }
@@ -865,27 +950,61 @@ pub mod reckoning {
     
     pub struct EntityDatabase {
         allocator: EntityAllocator,
-        tables: HashMap<FamilyId, Table>,
+
+        // The actual database tables are stored here. One table per family
+        // Each table is comprised of a set of type erased columns
+        // All access should be via the read side of the RwLock EXCEPT for
+        // creating new tables. Synchronization is carefully handled on a much
+        // more granular level for entity interactions.
+        tables: Arc<RwLock<HashMap<FamilyId, Table>>>,
+
+        // Data mappings and caches. Stores some critical information for
+        // quickly querying the DB
         maps: DbMaps, // cache?
     }
 
     impl EntityDatabase {
         /// Creates a new [EntityDatabase]
         pub fn new() -> Self {
-            Self {
+            let db = Self {
                 allocator: EntityAllocator::new(),
-                tables: HashMap::new(),
+                tables: Arc::new(RwLock::new(HashMap::new())),
                 maps: DbMaps::new(),
-            }
+            };
+
+            // prettier debug output when dealing with unit/null components
+            StableTypeId::register_debug_info::<()>();
+
+            // setup the unit/null component family
+            let unit_family_set = ComponentTypeSet::from_iter([ComponentType::of::<()>()]);
+            let family_id = db.new_family(unit_family_set).expect("please report this bug - unable to create unit component family");
+
+            println!("setup debug/null family: {:?}", family_id);
+
+            db
         }
 
         /// Creates an entity, returning its [EntityId]
         pub fn create(&self) -> Result<EntityId, CreateEntityError> {
-            self.allocator.alloc().map_err(|_| {
+            let entity = self.allocator.alloc().map_err(|_| {
                 CreateEntityError::IdAllocatorError
-            })
-        }
+            })?;
 
+            let unit_family_set = ComponentTypeSet::from_iter([ComponentType::of::<()>()]);
+            let unit_family = self.maps.get::<(ComponentTypeSet, FamilyId)>(&unit_family_set)
+                .ok_or(CreateEntityError::DbError(DbError::FailedToFindFamilyForSet(unit_family_set)))?;
+            
+            // add the entity to the unit/null family
+            let mut guard = self.maps
+                    .mut_map::<(EntityId, FamilyId)>()
+                    .ok_or(DbError::FailedToAcquireMapping)
+                    .map_err(|err| CreateEntityError::DbError(err))?;
+            guard.insert(entity, unit_family);
+
+
+            Ok(entity)
+        }
+        
         /// Adds a [Component] to an entity
         pub fn add_component<C: Component>(
             &mut self,
@@ -893,12 +1012,27 @@ pub mod reckoning {
             component: C
         ) -> Result<(), DbError>
         {
+            StableTypeId::register_debug_info::<C>(); // TODO: Fine to do this multiple times, but has perf impact, do once
+
             let cty = ComponentType::of::<C>();
             let delta = ComponentDelta::Add(cty);
 
-            let family = self.find_new_family(&entity, &delta)?;
-            self.resolve_entity_transfer(&entity, &family)?;
-            self.replace_real_component(&entity, component)?;
+            println!("adding component of type {} to {:?}", cty, entity);
+            
+            let cur_family = self.maps.get::<(EntityId, FamilyId)>(&entity);
+            println!("  {:?} currently belongs to family {:?}", entity, cur_family);
+            
+            let new_family = self.find_new_family(&entity, &delta)?;
+            if new_family == cur_family.unwrap() {
+                println!("  no need to move {:?} as it already belongs to {:?}", entity, new_family);
+            } else {
+                println!("  moving {:?} from {:?} to {:?}", entity, cur_family, new_family);
+            }
+
+            self.resolve_entity_transfer(&entity, &new_family)?;
+            println!("C");
+            self.set_component_for(&entity, component)?;
+            println!("D");
             
             Ok(())
         }
@@ -935,7 +1069,7 @@ pub mod reckoning {
         ) -> Result<FamilyId, DbError> {
             let family = self.maps
                 .get::<(EntityId, FamilyId)>(entity)
-                .ok_or(DbError::EntityDoesntExist)?;
+                .ok_or(DbError::EntityDoesntExist(*entity))?;
 
             match delta {
                 ComponentDelta::Add(component) => {
@@ -952,36 +1086,44 @@ pub mod reckoning {
             current: &FamilyId,
             component: &ComponentType
         ) -> Result<FamilyId, DbError> {
-            match self.query_transfer_graph(current, component) {
-                Some(edge) => {
-                    if let transfer::Edge::Add(family_id) = edge {
-                        return Ok(family_id)
-                    }
-                },
-                None => todo!(),
-            }
             
-            let components = self.maps
-                .get::<(FamilyId, ComponentTypeSet)>(current)
-                .ok_or(DbError::EntityBelongsToUnknownFamily)?;
-
-            if components.contains(&component) {
-                return Ok(*current)
+            // First try and find an already cached edge on the transfer graph for this family
+            if let Some(transfer::Edge::Add(family_id)) = self.query_transfer_graph(current, component) {
+                return Ok(family_id)
             } else {
-                let new_components_iter =
-                    components
-                    .iter()
-                    .cloned()
-                    .chain([*component]);
+                // Else resolve the family manually, and update the transfer graph
+                let components = self.maps
+                    .get::<(FamilyId, ComponentTypeSet)>(current)
+                    .ok_or(DbError::EntityBelongsToUnknownFamily)?;
 
-                let new_components = ComponentTypeSet::from_iter(new_components_iter);
-                let family = self.maps
-                    .get::<(ComponentTypeSet, FamilyId)>(&new_components);
-
-                if let Some(family) = family {
-                    return Ok(family)
+                if components.contains(&component) {
+                    println!("family already contains {}", component);
+                    return Ok(*current)
                 } else {
-                    return Ok(self.new_family(new_components)?);
+                    let new_components_iter =
+                        components
+                        .iter()
+                        .cloned()
+                        .chain([*component]);
+
+                    let new_components = ComponentTypeSet::from_iter(new_components_iter);
+
+                    println!("new component set names: {}", new_components.names());
+                    println!("new component type set id: {}", new_components.id);
+
+                    let family = match self.maps.get::<(ComponentTypeSet, FamilyId)>(&new_components) {
+                        Some(family) => {
+                            family
+                        },
+                        None => {
+                            self.new_family(new_components)?
+                        }
+                    };
+                    
+                    self.update_transfer_graph(current, component, transfer::Edge::Add(family))?;
+                    self.update_transfer_graph(&family, component, transfer::Edge::Remove(*current))?;
+
+                    Ok(family)
                 }
             }
         }
@@ -1001,21 +1143,27 @@ pub mod reckoning {
             &self,
             components: ComponentTypeSet
         ) -> Result<FamilyId, DbError> {
-            let id = FamilyId::from_iter(components.iter());
+            println!("creating new family for component set {}", components.names());
             
-            // component_group_to_family:      RwLock<HashMap<CTypeSet, FamilyId>>,
-            // entity_to_owning_family:        RwLock<HashMap<EntityId, FamilyId>>,
-            // families_containing_component:  RwLock<HashMap<CType,    FamilyIdSet>>,
-            // families_containing_set:        RwLock<HashMap<CTypeSet, FamilyIdSet>>,
-            // components_of_family:           RwLock<HashMap<FamilyId, CTypeSet>>,
-            // transfer_graph_of_family:       RwLock<HashMap<FamilyId, TransferGraph>>,
+            let family_id = FamilyId::from_iter(components.iter());
 
+            println!("new family id: {:?}", family_id);
+
+            
+            {
+                let mut guard = self.tables.write()
+                    .map_err(|e| DbError::UnableToAcquireTablesLock(e.to_string()))?;
+                
+                let table = Table::new(family_id);
+                guard.insert(family_id, table);
+            }
+            
             // We map each family to the set of components it represents
             {
                 let mut guard = self.maps
                     .mut_map::<(FamilyId, CTypeSet)>()
                     .ok_or(DbError::FailedToAcquireMapping)?;
-                guard.insert(id, components.clone());
+                guard.insert(family_id, components.clone());
             }
 
             // We reverse map each set of components to its family id
@@ -1023,7 +1171,7 @@ pub mod reckoning {
                 let mut guard = self.maps
                     .mut_map::<(CTypeSet, FamilyId)>()
                     .ok_or(DbError::FailedToAcquireMapping)?;
-                guard.insert(components.clone(), id);
+                guard.insert(components.clone(), family_id);
             }
 
             // We map each family to an associated transfer graph
@@ -1031,7 +1179,7 @@ pub mod reckoning {
                 let mut guard = self.maps
                     .mut_map::<(FamilyId, TransferGraph)>()
                     .ok_or(DbError::FailedToAcquireMapping)?;
-                guard.insert(id, TransferGraph::new());
+                guard.insert(family_id, TransferGraph::new());
             }
 
             // We map each component type in the set to every family that contains it
@@ -1045,19 +1193,22 @@ pub mod reckoning {
 
                     match guard.remove(cty) {
                         Some(old_family_set) => {
-                            set = FamilyIdSet::from(old_family_set.iter().chain([&id]));
+                            set = FamilyIdSet::from(old_family_set.iter().chain([&family_id]));
                         },
                         None => {
-                            set = FamilyIdSet::from(&[id]);
+                            set = FamilyIdSet::from(&[family_id]);
                         },
                     }
                     guard.insert(*cty, set);
                 }
             }
-
-            Ok(id)
+            
+            Ok(family_id)
         }
 
+        /// Tries to find an associated `TransferGraph` for the provided `FamilyId`, and then returns the
+        /// appropriate transfer edge of that graph associated with the provided `ComponentType`. A `transfer::Edge`
+        /// can be used to resolve either adding or removing a component from an entity
         fn query_transfer_graph(
             &self,
             family: &FamilyId,
@@ -1067,24 +1218,107 @@ pub mod reckoning {
                 .and_then(|graph| graph.get(component))
         }
 
-        fn resolve_entity_transfer(
+        fn update_transfer_graph(
             &self,
-            _: &EntityId,
-            _: &FamilyId
+            family: &FamilyId,
+            component: &ComponentType,
+            edge: transfer::Edge,
         ) -> Result<(), DbError> {
-            todo!()
+            let mut guard = self.maps
+                .mut_map::<(FamilyId, TransferGraph)>()
+                .ok_or(DbError::FailedToAcquireMapping)?;
+            
+            guard.get_mut(family).and_then(|graph| graph.set(component, edge));
+
+            Ok(())
         }
 
-        fn replace_real_component<C: Component>(
+        /// Transfers an entity out of its current family into the provided family, copying all component data
+        /// 
+        /// This typically happens when a component is added or removed from the entity
+        fn resolve_entity_transfer(
+            &self,
+            entity: &EntityId,
+            family: &FamilyId
+        ) -> Result<(), DbError> {
+
+            let curr_family: FamilyId = self.maps.get::<(EntityId, FamilyId)>(entity)
+                .ok_or(DbError::EntityDoesntExist(*entity))?;
+            
+            let dest_family: FamilyId = *family;
+
+            // No change needs to be resolved
+            if curr_family == dest_family {
+                return Ok(())
+            }
+            
+            // Table guard scope
+            // TODO: Make this re-entrant as we are accessing multiple RwLock's here
+            {
+                let from_guard = self.tables.read()
+                    .expect("unable to read data tables");
+                let data_from = from_guard.get(&curr_family)
+                    .ok_or(DbError::TableDoesntExistForFamily(curr_family))?;
+                
+                let dest_guard = self.tables.read()
+                    .expect("unable to read data tables");
+                let data_dest = dest_guard.get(&dest_family)
+                    .ok_or(DbError::TableDoesntExistForFamily(dest_family))?;
+
+                // Inner entity map guard scope
+                {
+                    let mut entity_map_guard = data_from.entitym.write()
+                        .expect("unable to write entity map in data table");
+
+                    if let Some(old_entity_index) = entity_map_guard.remove(entity) {
+                        // The entity should exist in this table, as it has an index,
+                        // we've removed its mapping in its old table, now lets move
+                        // its data and then patch up the new tables mapping, as well as
+                        // any other dbmaps we might be concerned about
+
+                        let new_entity_index = data_dest.get_next_free_row();
+
+                        // Move the entity from one table to the other, column by column.
+                        // This data is type-erased so we use a special "move" function pointer
+                        // we created with each column that knows what to do. We have to tell the
+                        // column in which to store the entity, however, as it's decided by the
+                        // table itself
+                        for (component_type, table_entry_from) in data_from.columns.iter() {
+                            if let Some(table_entry_dest) = data_dest.columns.get(component_type) {
+                                
+                                (table_entry_from.mvfn)(entity, new_entity_index, &table_entry_from.data, &table_entry_dest.data)
+
+                            }
+                        }
+
+
+                    }
+                }
+            }
+
+            Ok(())
+        }
+
+        fn set_component_for<C: Component>(
             &self,
             entity: &EntityId,
             component: C
         ) -> Result<(), DbError> {
             let family = self.maps.get::<(EntityId, FamilyId)>(entity)
                 .ok_or(DbError::EntityBelongsToUnknownFamily)?;
-            let table = self.tables.get(&family)
-                .ok_or(DbError::TableDoesntExist)?;
-            table.set_component(entity, component)?;
+
+            println!("BBB");
+            {
+                let table_guard = self.tables.read().expect("unable to read data tables");
+                let table: &Table = table_guard.get(&family)
+                    .ok_or(DbError::TableDoesntExistForFamily(family))?;
+                table.set_component(entity, component)?;
+            }
+
+            println!("CCC");
+
+
+            println!("DDD");
 
             Ok(())
         }
@@ -1104,27 +1338,46 @@ pub mod reckoning {
     mod transfer {
         use std::collections::HashMap;
         use std::sync::Arc;
+        use std::sync::RwLock;
         use crate::database::reckoning::CType;
         use super::FamilyId;
         use super::ComponentType;
         
         #[derive(Clone)]
         pub struct TransferGraph {
-            links: Arc<HashMap<CType, Edge>>,
+            links: Arc<RwLock<HashMap<CType, Edge>>>,
         }
 
         impl TransferGraph {
             pub fn new() -> Self {
                 Self {
-                    links: Arc::new(HashMap::new())
+                    links: Arc::new(RwLock::new(HashMap::new()))
                 }
             }
 
             pub fn get(&self, component: &ComponentType) -> Option<Edge> {
-                self.links.get(component).cloned()
+                match self.links.read() {
+                    Ok(graph) => {
+                        graph.get(component).cloned()
+                    },
+                    Err(e) => {
+                        panic!("unable to read transfer graph - rwlock - {:?}", e)
+                    }
+                }
+            }
+
+            pub fn set(&self, component: &ComponentType, edge: Edge) -> Option<Edge> {
+                match self.links.write() {
+                    Ok(mut graph) => {
+                        graph.insert(*component, edge)
+                    },
+                    Err(e) => {
+                        panic!("unable to set transfer graph - rwlock - {:?}", e)
+                    }
+                }
             }
         }
-        
+
         #[derive(Clone)]
         pub enum Edge {
             Add(FamilyId),
@@ -1844,15 +2097,16 @@ mod vehicle_example {
             Default::default()
         }
     }
-
+    
     #[derive(Debug, Default)]
     pub struct Wheels {
+        friction: f64,
         torque: f64,
         rpm: f64,
         radius: f64,
     }
     impl Component for Wheels {}
-
+    
     #[derive(Debug)]
     pub struct Chassis {
         weight: f64,
@@ -1863,6 +2117,7 @@ mod vehicle_example {
     pub struct Engine {
         power: f64,
         torque: f64,
+        rpm: f64,
         maxrpm: f64,
         throttle: f64,
     }
@@ -1870,8 +2125,8 @@ mod vehicle_example {
 
     #[derive(Debug)]
     pub struct Transmission {
-        gears: Vec<f32>,
-        current: Option<f32>,
+        gears: Vec<f64>,
+        current_gear: Option<usize>,
     }
     impl Component for Transmission {}
 
@@ -1887,27 +2142,79 @@ mod vehicle_example {
         type Data = (Read<Engine>, Read<Transmission>, Write<Wheels>);
 
         fn run(data: Rows<Self::Data>) -> TransformationResult {
-            for (e, t, w) in data {
-                
+            println!("running drive-train transformation");
+
+            // calculate engine torque & rpm
+
+            for (engine, transmission, wheels) in data {
+                if let Some(gear) = transmission.current_gear {
+                    if let Some(gear_ratio) = transmission.gears.get(gear) {
+                        wheels.torque = engine.torque * gear_ratio
+                    }
+                }
             }
             Ok(())
         }
     }
-
+    
     struct DriverInput;
     impl Transformation for DriverInput {
         type Data = (Read<Driver>, Write<Transmission>, Write<Engine>);
 
         fn run(data: Rows<Self::Data>) -> TransformationResult {
-            println!("running drive transformation");
+            println!("running driver transformation");
             
-            for (d, t, e) in data {
-                match d {
+            for (driver, transmission, engine) in data {
+                match driver {
                     Driver::SlowAndSteady => {
-                        e.throttle = 0.4;
+                        match engine.rpm {
+                            0.0..=5000.0 => {
+                                match transmission.current_gear {
+                                    Some(gear) => {
+                                        engine.throttle = 0.4
+                                    },
+                                    None => {
+                                        transmission.current_gear = Some(0)
+                                    }
+                                }
+                            },
+                            5000.0.. => {
+                                engine.throttle = 0.0;
+                                if let Some(gear) = transmission.current_gear {
+                                    if gear < transmission.gears.len() {
+                                        transmission.current_gear = Some(gear + 1)
+                                    }
+                                }
+                            },
+                            _ => {
+                                engine.throttle = 0.0
+                            }
+                        }
                     },
                     Driver::PedalToTheMetal => {
-                        e.throttle = 1.0;
+                        match engine.rpm {
+                            0.0..=5000.0 => {
+                                match transmission.current_gear {
+                                    Some(gear) => {
+                                        engine.throttle = 1.0
+                                    },
+                                    None => {
+                                        transmission.current_gear = Some(0)
+                                    }
+                                }
+                            },
+                            5000.0.. => {
+                                engine.throttle = 0.0;
+                                if let Some(gear) = transmission.current_gear {
+                                    if gear < transmission.gears.len() {
+                                        transmission.current_gear = Some(gear + 1)
+                                    }
+                                }
+                            },
+                            _ => {
+                                engine.throttle = 0.0
+                            }
+                        }
                     },
                 }
             }
@@ -1921,11 +2228,13 @@ mod vehicle_example {
         type Data = (Write<Wheels>, Read<Chassis>, Write<Physics>);
 
         fn run(data: Rows<Self::Data>) -> TransformationResult {
-            for (w, c, p) in data {
-                p.acc = w.torque / w.radius / c.weight;
-                p.vel += p.acc;
-                p.pos += p.vel;
-                w.rpm = p.vel * (60.0 / (2.0 * 3.14159) * w.radius);
+            println!("running wheel physics transformation");
+
+            for (wheels, chassis, physics) in data {
+                physics.acc = wheels.torque / wheels.radius / chassis.weight;
+                physics.vel += physics.acc;
+                physics.pos += physics.vel;
+                wheels.rpm = physics.vel * (60.0 / (2.0 * 3.14159) * wheels.radius);
             }
             Ok(())
         }
@@ -1938,20 +2247,20 @@ mod vehicle_example {
         let mut db = EntityDatabase::new();
         
         // Define some components from data, these could be loaded from a file
-        let v8_engine = Engine { power: 400.0, torque: 190.0, maxrpm: 5600.0, throttle: 0.0 };
-        let diesel_engine = Engine { power: 300.0, torque: 650.0, maxrpm: 3200.0, throttle: 0.0 };
+        let v8_engine = Engine { power: 400.0, torque: 190.0, rpm: 0.0, maxrpm: 5600.0, throttle: 0.0 };
+        let diesel_engine = Engine { power: 300.0, torque: 650.0, rpm: 0.0, maxrpm: 3200.0, throttle: 0.0 };
 
         let heavy_chassis = Chassis { weight: 7000.0, };
         let sport_chassis = Chassis { weight: 2200.0, };
 
         let five_speed = Transmission {
             gears: vec![2.95, 1.94, 1.34, 1.00, 0.73],
-            current: None,
+            current_gear: None,
         };
 
         let ten_speed = Transmission {
             gears: vec![4.69, 2.98, 2.14, 1.76, 1.52, 1.27, 1.00, 0.85, 0.68, 0.63],
-            current: None,
+            current_gear: None,
         };
         
         // Build the entities from the components we choose

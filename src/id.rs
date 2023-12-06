@@ -128,18 +128,18 @@ static STABLE_TYPE_ID_NAME_MAP: LazyLock<RwLock<HashMap<StableTypeId, &'static s
 
 // `StableTypeId`
 impl StableTypeId {
-    fn name(&self) -> Option<&'static str> {
+    pub fn name(&self) -> Option<&'static str> {
         match STABLE_TYPE_ID_NAME_MAP.read() {
             Ok(guard) => guard.get(self).copied(),
             Err(err) => panic!("poisoned mutex accessing stable type name: {}", err),
         }
     }
     
-    const fn type_name<T>() -> &'static str where T: ?Sized + 'static {
+    pub const fn type_name<T>() -> &'static str where T: ?Sized + 'static {
         std::any::type_name::<T>()
     }
 
-    const fn hash<T>() -> u64 where T: ?Sized + 'static {
+    pub const fn hash<T>() -> u64 where T: ?Sized + 'static {
         let name = Self::type_name::<T>();
         const_fnv1a_hash::fnv1a_hash_str_64(name)
     }

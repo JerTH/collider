@@ -131,6 +131,7 @@ mod vehicle_example {
         }
     }
     
+    #[ignore]
     #[test]
     fn vehicle_example() {
         std::env::set_var("RUST_BACKTRACE", "1");

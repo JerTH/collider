@@ -3,8 +3,8 @@
 //! 
 
 #![feature(const_type_name)]
-#![feature(once_cell)]
 #![feature(const_trait_impl)]
+#![feature(lazy_cell)]
 //#![feature(associated_type_defaults)]
 
 // Incomplete feature - monitor with caution
