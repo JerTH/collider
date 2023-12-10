@@ -19,6 +19,7 @@ pub mod reckoning {
     use std::sync::PoisonError;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicU32;
+    use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
     
     // collections
@@ -43,8 +44,10 @@ pub mod reckoning {
     /// This module is responsible for safe, non-aliased, and concurrent access
     /// to table columns
     mod borrowed {
+        use std::borrow::BorrowMut;
         use std::cell::UnsafeCell;
         use std::collections::HashMap;
+        use std::fmt::Display;
         use std::marker::PhantomData;
         use std::ops::{Deref, DerefMut};
         use std::ptr::NonNull;
@@ -57,7 +60,7 @@ pub mod reckoning {
         const NOT_BORROWED: isize = 0isize;
         const MUTABLE_BORROW: isize = -1isize;
 
-        #[derive(Default)]
+        #[derive(Default, Debug)]
         pub struct BorrowSentinel(AtomicIsize);
 
         impl BorrowSentinel {
@@ -279,28 +282,37 @@ pub mod reckoning {
             }
         }
 
+        const COLUMN_LENGTH_MAXIMUM: usize = 2^14;
+
         /// The owner of the actual data we are interested in. 
-        #[derive(Default)]
+        #[derive(Default, Debug)]
         pub struct Column<C: Component> {
             /// INVARIANT: 
             /// 
             /// For an entity in a table, its associated components must
             /// always occupy the same index in each column. Failure to
             /// uphold this invariant will result in undefined behavior
-            /// contained to the entities in the affected column
             values: UnsafeCell<Vec<C>>,
             borrow: BorrowSentinel,
         }
+
+        impl<C: Component> Display for Column<C> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "Column\n")?;
+                write!(f, "\t{:?}\n", self.borrow)?;
+                write!(f, "\t{:?}\n", unsafe { &*self.values.get() } )
+            }
+        }
         
         impl<'b, C: Component> Column<C> {
-            fn new() -> Self {
+            pub fn new() -> Self {
                 Self {
                     values: UnsafeCell::new(Vec::new()),
                     borrow: BorrowSentinel::new(),
                 }
             }
             
-            pub fn borrow(&'b self) -> ColumnRef<'b, C> {
+            pub fn borrow_column(&'b self) -> ColumnRef<'b, C> {
                 self.try_borrow().expect("column was already mutably borrowed")
             }
         
@@ -318,7 +330,7 @@ pub mod reckoning {
                 }
             }
             
-            pub fn borrow_mut(&'b self) -> ColumnRefMut<'b, C> {
+            pub fn borrow_column_mut(&'b self) -> ColumnRefMut<'b, C> {
                 self.try_borrow_mut().expect("column was already borrowed")
             }
             
@@ -337,17 +349,15 @@ pub mod reckoning {
             }
             
             /// Moves a single component from one [Column] to another, if they are the same type
-            fn dynamic_move(index: usize, from: &mut AnyPtr, dest: &mut AnyPtr)
+            pub fn dynamic_move(entity: &EntityId, index: usize, from: &AnyPtr, dest: &AnyPtr)
                 -> Result<usize, DbError> {
-                let mut from = from.downcast_mut::<Column<C>>()
-                    .ok_or(DbError::ColumnTypeDiscrepancy)?.borrow_mut();
-                let mut dest = dest.downcast_mut::<Column<C>>()
-                    .ok_or(DbError::ColumnTypeDiscrepancy)?.borrow_mut();
+                let mut from = from.downcast_ref::<Column<C>>()
+                    .ok_or(DbError::ColumnTypeDiscrepancy)?.borrow_column_mut();
                 
-                #[cfg(debug_assertions)]
-                if !(from.len() > index) {
-                    return Err(DbError::ColumnAccessOutOfBounds);
-                }
+                let mut dest = dest.downcast_ref::<Column<C>>()
+                    .ok_or(DbError::ColumnTypeDiscrepancy)?.borrow_column_mut();
+                
+                debug_assert!(from.len() < index);
                 
                 let component = from.remove(index);
                 dest.push(component);
@@ -355,9 +365,39 @@ pub mod reckoning {
             }
             
             /// Constructs a [Column] and returns a type erased pointer to it
-            fn dynamic_ctor() -> AnyPtr {
+            pub fn dynamic_ctor() -> AnyPtr {
                 Box::new(Column::<C>::new())
             }
+
+            /// Creates a new instance of the component type C at the specified instance
+            /// in the column
+            pub fn dynamic_instance(column: &AnyPtr, index: usize) {
+                // TODO: Just trying to get this working - need some guard rails around here
+                let concrete_column = column
+                    .downcast_ref::<Column<C>>()
+                    .expect("column type mismatch in dynamic method call");
+
+                concrete_column.resize_minimum(index);
+
+                let mut column = concrete_column.borrow_column_mut();
+                column[index] = Default::default();
+            }
+
+            pub fn resize_minimum(&self, size: usize) -> usize {
+                let power_of_two_index = (size + 1).next_power_of_two();
+                println!("making room for {} items with {} spaces", size, power_of_two_index);
+                
+                debug_assert!(power_of_two_index < COLUMN_LENGTH_MAXIMUM);
+
+                let mut column = self.borrow_column_mut();
+                let len = column.len();
+                if size >= len {
+                    column.resize_with(power_of_two_index, Default::default);
+                }
+                let new_len = column.len();
+                new_len
+            }
+
         }
     } // borrowed ======================================================================
     use borrowed::*;
@@ -436,7 +476,7 @@ pub mod reckoning {
         assert_eq!(id_a, id_aa)
     }
 
-    pub trait Component: Debug + 'static {}
+    pub trait Component: Default + Debug + 'static {}
     
     /// Component implementation for the unit type
     /// Every entity automatically gets this component upon creation
@@ -446,10 +486,12 @@ pub mod reckoning {
     /// A column contains one type of component. An single index into a table describes 
     /// an entity made up of different components in different columns
     pub struct TableEntry {
-        tyid: StableTypeId, // The type id of Column<T>  ([Self::data])
-        ctor: fn() -> AnyPtr,
-        mvfn: fn(&EntityId, usize, &AnyPtr, &AnyPtr),
-        data: AnyPtr, // Column<T>
+        pub tyid: StableTypeId, // The type id of Column<T>  ([Self::data])
+        pub data: AnyPtr, // Column<T>
+        
+        fn_constructor: fn() -> AnyPtr,
+        fn_instance: fn(&AnyPtr, usize),
+        fn_move: fn(&EntityId, usize, &AnyPtr, &AnyPtr) -> Result<usize, DbError>,
     }
     
     impl<'b> TableEntry {
@@ -458,7 +500,7 @@ pub mod reckoning {
 
             let column = self.data.downcast_ref::<Column<T>>()
                 .expect("expected matching column types");
-            let column_ref = column.borrow();
+            let column_ref = column.borrow_column();
             let column_iter = column_ref.into_iter();
 
             column_iter
@@ -469,29 +511,38 @@ pub mod reckoning {
 
             let column = self.data.downcast_ref::<Column<T>>()
                 .expect("expected matching column types");
-            let column_mut = column.borrow_mut();
+            let column_mut = column.borrow_column_mut();
             let column_iter_mut = column_mut.into_iter();
             
             column_iter_mut
         }
     }
 
+    impl Display for TableEntry {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "table entry");
+            write!(f, " type: {} - {}", self.tyid.0, self.tyid.name().unwrap_or("{unknown name}"))
+        }
+    }
+    
     pub struct Table {
         family: FamilyId,
-        columns: HashMap<CType, TableEntry>,
+        columns: RwLock<HashMap<CType, TableEntry>>, // hashmap never changes after the table is fully initialized
         entitym: RwLock<HashMap<EntityId, usize>>,
-        freerow: Option<usize>,
-        size: usize, // this should be equal to entitym.len()
+        numfree: AtomicUsize,
+        free: Mutex<Vec<usize>>,
+        size: AtomicUsize, // this should be equal to entitym.len()
     }
     
     impl Table {
         fn new(family: FamilyId) -> Self {
             Table {
                 family: family,
-                columns: HashMap::new(),
+                columns: RwLock::new(HashMap::new()),
                 entitym: RwLock::new(HashMap::new()),
-                freerow: None,
-                size: 0,
+                free: Mutex::new(Vec::new()),
+                numfree: AtomicUsize::new(0),
+                size: AtomicUsize::new(0),
             }
         }
 
@@ -499,30 +550,69 @@ pub mod reckoning {
         /// expanding the table if necessary
         fn get_next_free_row(&self) -> usize {
             // Do we already have a next free row?
-            if let Some(next) = self.freerow {
-
+            if self.numfree.load(Ordering::SeqCst) > 0 {
+                match self.free.lock() {
+                    Ok(mut guard) => {
+                        if let Some(free_row) = guard.pop() {
+                            self.numfree.fetch_sub(1, Ordering::SeqCst);
+                            return free_row
+                        }
+                    },
+                    Err(e) => {
+                        panic!("unable tot lock table free row mutex: {:?}", e);
+                    }
+                }
             }
+            return self.size.load(Ordering::SeqCst);
         }
 
+        /// Sets a component for an entity
         fn set_component<C: Component>(
             &self,
             entity: &EntityId,
             component: C
         ) -> Result<(), DbError>
         {
-            let component_type = ComponentType::of::<C>();
+            println!("setting component");
 
-            let index = *self.entitym.read().expect("unable to read table entity map").get(entity)
+            let component_type = ComponentType::of::<C>();
+            
+            let index = *self.entitym
+                .read()
+                .expect("unable to read table entity map")
+                .get(entity)
                 .ok_or(DbError::EntityNotInTable(*entity, self.family))?;
+
+            let mut column_guard = self.columns.write().expect("unable to acquire column lock");
+
+            let table_entry = column_guard.entry(component_type).or_insert_with(|| {
+                let mut column: Column<C> = Column::new();
+                
+                let mut table_entry = TableEntry {
+                    tyid: StableTypeId::of::<C>(),
+                    data: Box::new(column),
+                    fn_constructor: Column::<C>::dynamic_ctor,
+                    fn_instance: Column::<C>::dynamic_instance,
+                    fn_move: Column::<C>::dynamic_move,
+                };
+
+                table_entry
+            });
             
-            let entry = self.columns.get(&component_type)
-                .ok_or(DbError::ColumnDoesntExistInTable)?;
+            //let entry = self.columns.get(&component_type)
+            //    .ok_or(DbError::ColumnDoesntExistInTable)?;
             
-            let column = entry.data.downcast_ref::<Column<C>>()
+            let column = table_entry.data.downcast_ref::<Column<C>>()
                 .ok_or(DbError::ColumnTypeDiscrepancy)?;
             
+            println!("{}", column);
+
+            column.resize_minimum(index);
+
+            println!("{}", column);
+            
             // Borrow the column, panics if it is already borrowed
-            let mut column_ref = column.borrow_mut();
+            let mut column_ref = column.borrow_column_mut();
 
             column_ref[index] = component;
 
@@ -531,6 +621,57 @@ pub mod reckoning {
 
         fn move_row(row: &EntityId, dest: &Table) {
             //for component in self.
+        }
+
+        fn create_instance(&self, entity: EntityId) -> Result<usize, DbError> {
+            let index = self.get_next_free_row();
+
+            let mut entity_map_guard = self.entitym.write().map_err(|e| DbError::UnableToAcquireLock)?;
+            entity_map_guard.insert(entity, index);
+            
+            let column_guard = self.columns
+                .read()
+                .expect("unable to acquire column read lock");
+
+            column_guard.iter().for_each(|(_, table_entry)| {
+                let column = &table_entry.data;
+                (table_entry.fn_instance)(column, index)
+            });
+
+            Ok(index)
+        }
+    }
+
+    impl Display for Table {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            /*
+                family: FamilyId,
+                columns: HashMap<CType, TableEntry>,
+                entitym: RwLock<HashMap<EntityId, usize>>,
+                free: Mutex<Vec<usize>>,
+                numfree: AtomicUsize,
+                size: AtomicUsize,
+            */
+            write!(f, "\nTABLE\n")?;
+            write!(f, "family: {}\n", self.family)?;
+            write!(f, "size: {}\n", self.size.load(Ordering::SeqCst))?;
+            write!(f, "num_free: {}\n", self.numfree.load(Ordering::SeqCst))?;
+            
+            {
+                write!(f, "entity_map:\n")?;
+                if let Ok(entity_map) = self.entitym.read() {
+                    for item in entity_map.iter() {
+                        write!(f, " {}->{}\n", item.0, item.1)?;
+                    }
+                }
+            }
+
+            write!(f, "columns:\n")?;
+            let column_guard = self.columns.read().expect("unable to acquire column read lock");
+            for item in column_guard.iter() {
+                write!(f, " {}\n {}", item.0, item.1)?;
+            }
+            write!(f, "\n")
         }
     }
 
@@ -750,6 +891,12 @@ pub mod reckoning {
     #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
     pub struct FamilyId(CommutativeId);
 
+    impl Display for FamilyId {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{}", self.0.0)
+        }
+    }
+
     impl<'i> FromIterator<&'i ComponentType> for FamilyId {
         fn from_iter<T: IntoIterator<Item = &'i ComponentType>>(iter: T) -> Self {
             FamilyId(CommutativeId::from_iter(iter.into_iter().map(|id| id.0.0)))
@@ -887,6 +1034,12 @@ pub mod reckoning {
         }
     }
     
+    impl From<DbError> for CreateEntityError {
+        fn from(err: DbError) -> Self {
+            CreateEntityError::DbError(err)
+        }
+    }
+
     #[derive(Debug)]
     pub enum DbError {
         EntityDoesntExist(EntityId),
@@ -901,6 +1054,8 @@ pub mod reckoning {
         ColumnDoesntExistInTable,
         EntityNotInTable(EntityId, FamilyId),
         UnableToAcquireTablesLock(String),
+        FamilyDoesntExist(FamilyId),
+        UnableToAcquireLock,
     }
 
     impl Error for DbError {}
@@ -944,6 +1099,12 @@ pub mod reckoning {
                 DbError::UnableToAcquireTablesLock(reason) => {
                     write!(f, "unable to acquire master table lock: {}", reason)
                 },
+                DbError::FamilyDoesntExist(family) => {
+                    write!(f, "family doesn't exist: {}", family)
+                },
+                DbError::UnableToAcquireLock => {
+                    write!(f, "failed to acquire poisoned lock")
+                }
             }
         }
     }
@@ -986,20 +1147,39 @@ pub mod reckoning {
 
         /// Creates an entity, returning its [EntityId]
         pub fn create(&self) -> Result<EntityId, CreateEntityError> {
+            println!("creating entity");
+
             let entity = self.allocator.alloc().map_err(|_| {
                 CreateEntityError::IdAllocatorError
             })?;
 
             let unit_family_set = ComponentTypeSet::from_iter([ComponentType::of::<()>()]);
-            let unit_family = self.maps.get::<(ComponentTypeSet, FamilyId)>(&unit_family_set)
+            let unit_family_id = self.maps.get::<(ComponentTypeSet, FamilyId)>(&unit_family_set)
                 .ok_or(CreateEntityError::DbError(DbError::FailedToFindFamilyForSet(unit_family_set)))?;
             
             // add the entity to the unit/null family
-            let mut guard = self.maps
+            {
+                let mut guard = self.maps
                     .mut_map::<(EntityId, FamilyId)>()
                     .ok_or(DbError::FailedToAcquireMapping)
                     .map_err(|err| CreateEntityError::DbError(err))?;
-            guard.insert(entity, unit_family);
+        
+                guard.insert(entity, unit_family_id);
+
+                match self.tables.read() {
+                    Ok(guard) => {
+                        let table = guard
+                            .get(&unit_family_id)
+                            .ok_or(DbError::FamilyDoesntExist(unit_family_id))?;
+                        
+                        table.create_instance(entity);
+                    },
+                    Err(e) => {
+                        println!("failed to create entity: {}", e);
+                    }
+                }
+            }
+
 
 
             Ok(entity)
@@ -1030,9 +1210,7 @@ pub mod reckoning {
             }
 
             self.resolve_entity_transfer(&entity, &new_family)?;
-            println!("C");
             self.set_component_for(&entity, component)?;
-            println!("D");
             
             Ok(())
         }
@@ -1241,6 +1419,7 @@ pub mod reckoning {
             entity: &EntityId,
             family: &FamilyId
         ) -> Result<(), DbError> {
+            println!("resolve entity transfer");
 
             let curr_family: FamilyId = self.maps.get::<(EntityId, FamilyId)>(entity)
                 .ok_or(DbError::EntityDoesntExist(*entity))?;
@@ -1255,50 +1434,102 @@ pub mod reckoning {
             // Table guard scope
             // TODO: Make this re-entrant as we are accessing multiple RwLock's here
             {
-                let from_guard = self.tables.read()
-                    .expect("unable to read data tables");
-                let data_from = from_guard.get(&curr_family)
-                    .ok_or(DbError::TableDoesntExistForFamily(curr_family))?;
-                
-                let dest_guard = self.tables.read()
-                    .expect("unable to read data tables");
-                let data_dest = dest_guard.get(&dest_family)
-                    .ok_or(DbError::TableDoesntExistForFamily(dest_family))?;
+                // try-back-off synchronization
+                loop {
+                    let table_guard;
+                    let mut entity_map_from_guard;
+                    let mut entity_map_dest_guard;
+                    let success;
+                    let data_table_from;
+                    let data_table_dest;
 
-                // Inner entity map guard scope
-                {
-                    let mut entity_map_guard = data_from.entitym.write()
-                        .expect("unable to write entity map in data table");
+                    if let Ok(g) = self.tables.try_read() {
+                        table_guard = g;
 
-                    if let Some(old_entity_index) = entity_map_guard.remove(entity) {
-                        // The entity should exist in this table, as it has an index,
-                        // we've removed its mapping in its old table, now lets move
-                        // its data and then patch up the new tables mapping, as well as
-                        // any other dbmaps we might be concerned about
+                        data_table_from = table_guard
+                            .get(&curr_family)
+                            .ok_or(DbError::TableDoesntExistForFamily(curr_family))?;
 
-                        let new_entity_index = data_dest.get_next_free_row();
 
-                        // Move the entity from one table to the other, column by column.
-                        // This data is type-erased so we use a special "move" function pointer
-                        // we created with each column that knows what to do. We have to tell the
-                        // column in which to store the entity, however, as it's decided by the
-                        // table itself
-                        for (component_type, table_entry_from) in data_from.columns.iter() {
-                            if let Some(table_entry_dest) = data_dest.columns.get(component_type) {
+                        data_table_dest = table_guard
+                            .get(&dest_family)
+                            .ok_or(DbError::TableDoesntExistForFamily(dest_family))?;
+
+                        if let Ok(gg) = data_table_from.entitym.try_write() {
+                            entity_map_from_guard = gg;
+
+                            if let Ok(ggg) = data_table_dest.entitym.try_write() {
+                                entity_map_dest_guard = ggg;
                                 
-                                (table_entry_from.mvfn)(entity, new_entity_index, &table_entry_from.data, &table_entry_dest.data)
-
+                                success = true;
+                            } else {
+                                continue;
                             }
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        continue; // locking has failed, loop again
+                    }
+
+                    if success {
+                        println!("acquired locks to resolve entity transfer");
+                        
+                        // If we've successfully locked everything we need this loop, we can proceeed
+                        if let Some(old_entity_index) = entity_map_from_guard.remove(entity) {
+                            // The entity should exist in this table, as it has an index,
+                            // we've removed its mapping in its old table, now lets move
+                            // its data and then patch up the new tables mapping, as well as
+                            // any other dbmaps we might be concerned about
+                            
+                            let new_entity_index = data_table_dest.get_next_free_row();
+    
+                            // Move the entity from one table to the other, column by column.
+                            // This data is type-erased so we use a special "move" function pointer
+                            // we created with each column that knows what to do. We have to tell the
+                            // column in which to store the entity, however, as it's decided by the
+                            // table itself
+
+                            let column_from_guard = data_table_from.columns
+                                .read()
+                                .expect("unable to acquire column read lock");
+
+                            for (component_type, table_entry_from) in column_from_guard.iter() {
+                                print!("checking table for matching column...");
+
+                                let column_dest_guard = data_table_dest.columns
+                                    .read()
+                                    .expect("unable to acquire column read lock");
+
+                                if let Some(table_entry_dest) = column_dest_guard.get(component_type) {
+                                    println!("moving component");
+                                    let index = (table_entry_from.fn_move)(entity, new_entity_index, &table_entry_from.data, &table_entry_dest.data)?;
+                                }
+                            }
+
+                            entity_map_dest_guard.insert(*entity, new_entity_index);
+                            println!("\nEMFG:::{:?}", entity_map_from_guard);
+                            println!("EMDG:::{:?}", entity_map_dest_guard);
                         }
 
+                        {
+                            let mut guard = self.maps
+                                .mut_map::<(EntityId, FamilyId)>()
+                                .ok_or(DbError::FailedToAcquireMapping)?;
 
+                            guard.insert(*entity, dest_family);
+                        }
+
+                        return Ok(())
                     }
                 }
             }
-
-            Ok(())
         }
 
+        /// Explicitly sets a component for an entity. This is often the first time
+        /// a real component of a given type is created to an entity/family, and thus
+        /// we may need to actually initialize the data column in the table we are
+        /// trying to set data for
         fn set_component_for<C: Component>(
             &self,
             entity: &EntityId,
@@ -1307,20 +1538,31 @@ pub mod reckoning {
             let family = self.maps.get::<(EntityId, FamilyId)>(entity)
                 .ok_or(DbError::EntityBelongsToUnknownFamily)?;
 
-            println!("BBB");
             {
                 let table_guard = self.tables.read().expect("unable to read data tables");
                 let table: &Table = table_guard.get(&family)
                     .ok_or(DbError::TableDoesntExistForFamily(family))?;
+
+                println!("set component for");
+                println!("{}", &self);
+                
                 table.set_component(entity, component)?;
             }
-
-            println!("CCC");
-
-
-            println!("DDD");
-
             Ok(())
+        }
+    }
+
+    impl Display for EntityDatabase {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "db dump\n")?;
+            {
+                if let Ok(guard) = self.tables.read() {
+                    for item in guard.iter() {
+                        write!(f, "{}",item.1)?;
+                    }
+                }
+            }
+            write!(f, "\n")
         }
     }
 
@@ -2081,6 +2323,8 @@ impl_transformations!([A, 0], [B, 1], [C, 2], [D, 3], [E, 4], [F, 5], [G, 6], [H
 #[cfg(test)]
 #[allow(dead_code)]
 mod vehicle_example {
+    use std::default;
+
     use super::reckoning::*;
     use super::reckoning::transform::*;
 
@@ -2107,13 +2351,13 @@ mod vehicle_example {
     }
     impl Component for Wheels {}
     
-    #[derive(Debug)]
+    #[derive(Debug, Default)]
     pub struct Chassis {
         weight: f64,
     }
     impl Component for Chassis {}
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, Default)]
     pub struct Engine {
         power: f64,
         torque: f64,
@@ -2123,15 +2367,16 @@ mod vehicle_example {
     }
     impl Component for Engine {}
 
-    #[derive(Debug)]
+    #[derive(Debug, Default)]
     pub struct Transmission {
         gears: Vec<f64>,
         current_gear: Option<usize>,
     }
     impl Component for Transmission {}
 
-    #[derive(Debug)]
+    #[derive(Debug, Default)]
     pub enum Driver {
+        #[default]
         SlowAndSteady,
         PedalToTheMetal,
     }
@@ -2246,6 +2491,8 @@ mod vehicle_example {
         
         let mut db = EntityDatabase::new();
         
+        println!("\n\n\n\n{}\n\n\n\n", db);
+
         // Define some components from data, these could be loaded from a file
         let v8_engine = Engine { power: 400.0, torque: 190.0, rpm: 0.0, maxrpm: 5600.0, throttle: 0.0 };
         let diesel_engine = Engine { power: 300.0, torque: 650.0, rpm: 0.0, maxrpm: 3200.0, throttle: 0.0 };
@@ -2266,7 +2513,10 @@ mod vehicle_example {
         // Build the entities from the components we choose
         // This can be automated from data
         let sports_car = db.create().unwrap();
+        println!("\n\n\n\n{}\n\n\n\n", db);
         db.add_component(sports_car, v8_engine.clone()).unwrap();
+        println!("\n\n\n\n{}\n\n\n\n", db);
+
         db.add_component(sports_car, five_speed).unwrap();
         db.add_component(sports_car, sport_chassis).unwrap();
         db.add_component(sports_car, Wheels::default()).unwrap();
@@ -2313,70 +2563,6 @@ mod vehicle_example {
 
             break;
         }
-    }
-}
-
-mod creature_example {
-    use super::reckoning::*;
-
-    trait Metabolizable {}
-
-    /// The state of the creatures bloodstream,
-    /// including total blood, dilation, blockage
-    struct Bloodstream {
-        /// The total volume of blood present
-        /// arteries contain 10-15%, veins 70%
-        volume: u32,
-        
-        /// The status of the blood vessels.
-        /// Values represent major regions,
-        /// vessels can be blocked, dilated,
-        /// constricted, severed, etc.
-        /// 0: Aorta
-        vessels: [u8; 12],
-        
-        /// The volumes of things in the bloodstream
-        content: Vec<Box<dyn Metabolizable>>,
-    }
-
-    /// A single kidney
-    struct Kidney {
-        /// The filtration efficiency of this kidney
-        filtration: u8,
-    }
-
-    struct Lung {
-        capacity: u16,
-    }
-
-    struct Heart {
-        frequency: u16,
-    }
-
-    /// The state of the creatures vital organs,
-    /// e.g. Heart, Lungs, Liver, Kidneys
-    struct VitalOrgans {
-        lhs_kidney: Option<Kidney>,
-        rhs_kidney: Option<Kidney>,
-        lhs_lung: Option<Lung>,
-        rhs_lung: Option<Lung>,
-        heart: Option<Heart>,
-    }
-
-    /// The state of the creatures muscles,
-    /// muscles need oxygenated blood,
-    /// the creature can't move without muscles
-    struct Muscles;
-    /// The state of the creatures brain
-    struct Brain;
-    /// The creatures mind, acts as a blackboard for
-    /// an associated AI, remembers things, it usually
-    /// needs a brain or brain-like thing to work
-    struct Mind;
-
-    #[test]
-    fn creature_example() {
-
     }
 }
 

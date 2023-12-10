@@ -264,7 +264,7 @@ impl EntityDatabase {
                 let column = ComponentColumn::new();
                 
                 column.insert(entity, component);
-
+                
                 let column_entry = ComponentColumnEntry {
                     data: Box::new(column),
                     mvfn: ComponentColumn::<T>::fn_virtual_move,

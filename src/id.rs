@@ -1,5 +1,6 @@
 use std::hash::Hash;
 use std::ops::Deref;
+use std::fmt::Display;
 use std::sync::RwLock;
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -98,6 +99,12 @@ impl EntityId {
     
     pub(crate) fn generational(idx: u32, gen: u16, m1: u8, m2: u8) -> Self {
         EntityId(IdUnion{generational: (idx, gen, m1, m2)})
+    }
+}
+
+impl Display for EntityId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "E[{:?}]", self.0)
     }
 }
 
