@@ -241,7 +241,7 @@ impl EntityDatabase {
             },
         }
     }
-
+    
     /// Inserts or replaces component data for a given entity in the appropriate `DataTable`, associated
     /// by the entities `Family`. Lazily constructs data tables component columns
     fn insert_real_component<T: Component>(&mut self, entity: &EntityId, family: &FamilyId, component: T) -> Result<(), ()> {

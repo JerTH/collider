@@ -1,10 +1,12 @@
 use std::hash::Hash;
 use std::ops::Deref;
-use std::fmt::Display;
-use std::sync::RwLock;
-use std::collections::HashMap;
+use std::fmt::{Display, self};
+use std::sync::{RwLock, Arc};
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 use std::fmt::Debug;
+
+use crate::database::ComponentType;
 
 
 #[derive(Copy, Clone)]
@@ -13,6 +15,7 @@ pub union IdUnion {
     pub(crate) generational: (u32, u16, u8, u8),
 
     /// Interprets the id as (id, id) for relational links
+    #[allow(dead_code)]
     pub(crate) relational: (u32, u32),
 
     /// Interprets the id as a raw u64, also forces the union into 8 byte alignment
@@ -29,18 +32,68 @@ pub union IdUnion {
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct EntityId(pub(crate) IdUnion);
 
+impl EntityId {
+    pub fn inner(&self) -> IdUnion {
+        self.0
+    }
+}
+
 /// A `ComponentId` uniquely identifies a single component within a column of components
 /// 
 /// These are functionally the same as `EntityId`'s
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub(crate) struct ComponentId(pub(crate) IdUnion);
 
-/// A `FamilyId` uniquely identifies a single family
-/// 
-/// These are functionally the same as `EntityId`'s
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[deprecated]
-pub struct FamilyId(pub(crate) IdUnion);
+pub struct FamilyId(CommutativeId);
+impl Display for FamilyId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0.0)
+    }
+}
+
+impl<'i> FromIterator<&'i ComponentType> for FamilyId {
+    fn from_iter<T: IntoIterator<Item = &'i ComponentType>>(iter: T) -> Self {
+        FamilyId(CommutativeId::from_iter(iter.into_iter().map(|id| id.inner().raw_id())))
+    }
+}
+
+/// An immutable set of family id's
+
+pub(crate) type FamilyIdSetImpl = HashSet<FamilyId>; // INVARIANT: This type MUST NOT accept duplicates 
+pub(crate) type FamilyIdSetInner = (CommutativeId, FamilyIdSetImpl);
+
+#[derive(Clone)]
+pub struct FamilyIdSet {
+    ptr: Arc<FamilyIdSetInner>, // thread-local?
+}
+
+impl FamilyIdSet {
+    pub fn contains(&self, id: &FamilyId) -> bool {
+        self.ptr.1.contains(id)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &FamilyId> {
+        self.ptr.1.iter()
+    }
+}
+
+impl<'i> FromIterator<FamilyId> for FamilyIdSet {
+    fn from_iter<I: IntoIterator<Item = FamilyId>>(iter: I) -> Self {
+        let set: FamilyIdSetImpl = iter.into_iter().collect();
+        let set_id = CommutativeId::from_iter(set.iter().map(|id| id.0));
+        FamilyIdSet { ptr: Arc::new((set_id, set)) }
+    }
+}
+
+impl<'i, I> From<I> for FamilyIdSet
+where
+    I: IntoIterator<Item = &'i FamilyId>,
+{
+    fn from(into_iter: I) -> Self {
+        FamilyIdSet::from_iter(into_iter.into_iter().cloned())
+    }
+}
 
 /// A stable `TypeId` which (should) be common across builds. This isn't a guarantee, especially
 /// across different rust versions. Used to generate better errors
@@ -116,20 +169,6 @@ impl Deref for EntityId {
     }
 }
 
-// `ComponentId`
-impl From<EntityId> for ComponentId {
-    fn from(value: EntityId) -> Self {
-        ComponentId(value.0)
-    }
-}
-
-impl From<EntityId> for FamilyId {
-    fn from(value: EntityId) -> Self {
-        FamilyId(value.0)
-    }
-}
-
-
 static STABLE_TYPE_ID_NAME_MAP: LazyLock<RwLock<HashMap<StableTypeId, &'static str>>>
     = LazyLock::new(|| RwLock::new(HashMap::new()));
 
@@ -170,6 +209,10 @@ impl StableTypeId {
             Err(err) => panic!("poisoned mutex registering stable type debug info: {}", err),
         };
     }
+
+    pub fn raw_id(&self) -> u64 {
+        self.0
+    }
 }
 
 impl Debug for StableTypeId {
@@ -179,4 +222,78 @@ impl Debug for StableTypeId {
             None => write!(f, "[unknown type]"),
         }
     }
+}
+
+// [CommutativeId]
+
+pub(crate) type CommutativeHashValue = u64;
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct CommutativeId(CommutativeHashValue);
+pub(crate) const COMMUTATIVE_ID_INIT: CommutativeId = CommutativeId(COMMUTATIVE_HASH_PRIME);
+pub(crate) const COMMUTATIVE_HASH_TYPE_ZERO: CommutativeHashValue = 0 as CommutativeHashValue;
+pub(crate) const COMMUTATIVE_HASH_PRIME: CommutativeHashValue = 0x29233AAB26330D; // 11579208931619597
+
+impl CommutativeId {
+    pub fn and(&self, other: &CommutativeId) -> Self {
+        Self::combine(self, other)
+    }
+
+    fn combine(first: &Self, other: &Self) -> Self {
+        debug_assert!(first.non_zero());
+        debug_assert!(other.non_zero());
+
+        CommutativeId(
+            first.0
+                .wrapping_add(other.0)
+                .wrapping_add(other.0
+                    .wrapping_mul(first.0))
+        )
+    }
+
+    #[inline(always)]
+    fn non_zero(&self) -> bool {
+        !(self.0 == 0)
+    }
+}
+
+impl FromIterator<CommutativeId> for CommutativeId {
+    fn from_iter<T: IntoIterator<Item = CommutativeId>>(iter: T) -> Self {
+        iter.into_iter().fold(COMMUTATIVE_ID_INIT, |acc, x| {
+            CommutativeId::combine(&acc, &x)
+        })
+    }
+}
+
+impl FromIterator<CommutativeHashValue> for CommutativeId {
+    fn from_iter<T: IntoIterator<Item = CommutativeHashValue>>(iter: T) -> Self {
+        iter.into_iter().fold(COMMUTATIVE_ID_INIT, |acc, x| {
+            CommutativeId::combine(&acc, &CommutativeId(x))
+        })
+    }
+}
+
+impl<'i> FromIterator<&'i CommutativeHashValue> for CommutativeId {
+    fn from_iter<T: IntoIterator<Item = &'i CommutativeHashValue>>(iter: T) -> Self {
+        iter.into_iter().fold(COMMUTATIVE_ID_INIT, |acc, x| {
+            CommutativeId::combine(&acc, &CommutativeId(*x))
+        })
+    }
+}
+
+#[test]
+fn test_commutative_id() {
+    let iter_a = [StableTypeId::of::<f32>(), StableTypeId::of::<f64>()];
+    let iter_aa = [StableTypeId::of::<f64>(), StableTypeId::of::<f32>()];
+    let iter_b = [StableTypeId::of::<i8>(), StableTypeId::of::<i16>()];
+    let iter_c = [StableTypeId::of::<i8>(), StableTypeId::of::<i16>(), StableTypeId::of::<i32>()];
+    let id_a = CommutativeId::from_iter(iter_a.into_iter().map(|i| i.0));
+    let id_aa = CommutativeId::from_iter(iter_aa.into_iter().map(|i| i.0));
+    let id_b = CommutativeId::from_iter(iter_b.into_iter().map(|i| i.0));
+    let id_c = CommutativeId::from_iter(iter_c.into_iter().map(|i| i.0));
+    
+    assert_ne!(id_a, id_b);
+    assert_ne!(id_a, id_c);
+    assert_ne!(id_b, id_c);
+
+    assert_eq!(id_a, id_aa)
 }

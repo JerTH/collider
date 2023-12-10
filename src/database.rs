@@ -5,8 +5,6 @@ pub mod reckoning {
     use core::fmt;
     // misc
     use std::any::Any;
-    use std::any::type_name;
-    use std::borrow::BorrowMut;
     use std::error::Error;
     use std::fmt::Debug;
     use std::fmt::Display;
@@ -30,457 +28,18 @@ pub mod reckoning {
 
     // crate
     use crate::EntityId;
-    use crate::id::{StableTypeId, IdUnion};
+    use crate::id::*;
+    use crate::table::*;
+    use crate::borrowed::*;
 
     // typedefs
-    type CType = self::ComponentType;
-    type CTypeSet = self::ComponentTypeSet;
-    type ColumnReadGuard<'a> = RwLockReadGuard<'a, HashMap<CType, TableEntry>>;
-    type ColumnWriteGuard<'a> = RwLockWriteGuard<'a, HashMap<CType, TableEntry>>;
-    type AnyPtr = Box<dyn Any>;
-    type CommutativeHashValue = u64;
-    type FamilyIdSetImpl = HashSet<FamilyId>; // INVARIANT: This type MUST NOT accept duplicates 
-    type FamilyIdSetInner = (CommutativeId, FamilyIdSetImpl);
-    
-    /// Borrowed
-    /// 
-    /// This module is responsible for safe, non-aliased, and concurrent access
-    /// to table columns
-    mod borrowed {
-        use std::borrow::BorrowMut;
-        use std::cell::UnsafeCell;
-        use std::collections::HashMap;
-        use std::fmt::Display;
-        use std::marker::PhantomData;
-        use std::ops::{Deref, DerefMut};
-        use std::ptr::NonNull;
-        use std::sync::atomic::{AtomicIsize, Ordering};
+    pub(crate) type CType = self::ComponentType;
+    pub(crate) type CTypeSet = self::ComponentTypeSet;
+    pub(crate) type ColumnReadGuard<'a> = RwLockReadGuard<'a, HashMap<CType, TableEntry>>;
+    pub(crate) type ColumnWriteGuard<'a> = RwLockWriteGuard<'a, HashMap<CType, TableEntry>>;
+    pub(crate) type AnyPtr = Box<dyn Any>;
 
-        use crate::EntityId;
-
-        use super::{AnyPtr, Component, DbError};
-
-        const NOT_BORROWED: isize = 0isize;
-        const MUTABLE_BORROW: isize = -1isize;
-
-        #[derive(Default, Debug)]
-        pub struct BorrowSentinel(AtomicIsize);
-
-        impl BorrowSentinel {
-            fn new() -> Self {
-                Default::default()
-            }
-        }
-
-        impl Deref for BorrowSentinel {
-            type Target = AtomicIsize;
-
-            fn deref(&self) -> &Self::Target {
-                &self.0
-            }
-        }
-
-        #[inline]
-        fn is_mut_borrow(value: isize) -> bool {
-            value < NOT_BORROWED
-        } 
-
-        pub struct BorrowRef<'b> { borrow: &'b BorrowSentinel }
-
-        impl<'b> BorrowRef<'b> {
-            pub fn new(borrow: &'b BorrowSentinel) -> Option<Self> {
-                loop {
-                    let cur = borrow.load(Ordering::SeqCst);
-                    let new = cur + 1;
-                    if is_mut_borrow(new) {
-                        return None;
-                    } else {
-                        match borrow.compare_exchange(
-                            cur, new, 
-                            Ordering::SeqCst, 
-                            Ordering::SeqCst
-                        ) {
-                            Ok(_) => {
-                                return Some(BorrowRef { borrow });
-                            },
-                            Err(_) => {
-                                continue; // someone else likely interacted with this borrow, try again
-                            },
-                        }
-                    }
-                }
-            }
-        }
-
-        impl<'b> Drop for BorrowRef<'b> {
-            fn drop(&mut self) {
-                let borrow = self.borrow;
-                #[cfg(debug_assertions)]
-                {
-                    let cur = borrow.load(Ordering::SeqCst);
-                    debug_assert!(!is_mut_borrow(cur));
-                }
-                borrow.fetch_sub(1isize, Ordering::SeqCst);
-            }
-        }
-
-        pub struct BorrowRefMut<'b> { borrow: &'b BorrowSentinel }
-
-        impl<'b> BorrowRefMut<'b> {
-            pub fn new(borrow: &'b BorrowSentinel) -> Option<Self> {
-                let cur = NOT_BORROWED;
-                let new = MUTABLE_BORROW;
-                match borrow.compare_exchange(
-                        cur, new, 
-                        Ordering::SeqCst, 
-                        Ordering::SeqCst
-                    ) {
-                    Ok(_) => {
-                        return Some(BorrowRefMut { borrow });
-                    },
-                    Err(_) => {
-                        return None
-                    },
-                }
-            }
-        }
-
-        impl<'b> Drop for BorrowRefMut<'b> {
-            fn drop(&mut self) {
-                let borrow = self.borrow;
-                #[cfg(debug_assertions)]
-                {
-                    let cur = borrow.load(Ordering::SeqCst);
-                    debug_assert!(is_mut_borrow(cur));
-                }
-                borrow.fetch_add(1isize, Ordering::SeqCst);
-            }
-        }
-
-        #[derive(Debug)]
-        pub enum BorrowError {
-            AlreadyBorrowed,
-        }
-
-        type ColumnType<C: Component> = Vec<C>;
-
-        pub struct ColumnRef<'b, C> {
-            column: NonNull<ColumnType<C>>,
-            borrow: BorrowRef<'b>,
-        }
-
-        impl<'b, C> ColumnRef<'b, C> {
-            pub fn new(column: NonNull<ColumnType<C>>, borrow: BorrowRef<'b>) -> Self {
-                Self { column, borrow }
-            }
-        }
-
-        impl<C> Deref for ColumnRef<'_, C> {
-            type Target = ColumnType<C>;
-
-            fn deref(&self) -> &Self::Target {
-                // SAFETY
-                // Safe to access because we hold a runtime checked borrow
-                unsafe { self.column.as_ref() }
-            }
-        }
-
-        impl<'b, C: 'b> IntoIterator for ColumnRef<'b, C> {
-            type Item = &'b C;
-            type IntoIter = ColumnIter<'b, C>;
-
-            fn into_iter(self) -> Self::IntoIter {
-                let size = self.len();
-                ColumnIter {
-                    column: unsafe { self.column.as_ref() },
-                    borrow: self.borrow,
-                    size,
-                    next: 0usize,
-                }
-            }
-        }
-        
-        pub struct ColumnIter<'b, C> {
-            column: &'b ColumnType<C>,
-            borrow: BorrowRef<'b>,
-            size: usize,
-            next: usize,
-        }
-        
-        impl<'b, C: 'b> Iterator for ColumnIter<'b, C> {
-            type Item = &'b C;
-            
-            fn next(&mut self) -> Option<Self::Item> {
-                let val = self.column.get(self.next);
-                self.next = std::cmp::min(self.next + 1, self.size);
-                val
-            }
-        }
-
-        pub struct ColumnRefMut<'b, T> {
-            column: NonNull<Vec<T>>,
-            borrow: BorrowRefMut<'b>,
-        }
-
-        impl<'b, T> ColumnRefMut<'b, T> {
-            pub fn new(column: NonNull<Vec<T>>, borrow: BorrowRefMut<'b>) -> Self {
-                Self { column, borrow }
-            }
-        }
-
-        impl<T> Deref for ColumnRefMut<'_, T> {
-            type Target = Vec<T>;
-
-            fn deref(&self) -> &Self::Target {
-                // SAFETY
-                // Safe to access because we hold a runtime checked borrow
-                unsafe { self.column.as_ref() }
-            }
-        }
-
-        impl<T> DerefMut for ColumnRefMut<'_, T> {
-            fn deref_mut(&mut self) -> &mut Self::Target {
-                // SAFETY
-                // Safe to access because we hold a runtime checked borrow
-                unsafe { self.column.as_mut() }
-            }
-        }
-
-        impl<'b, T: 'b> IntoIterator for ColumnRefMut<'b, T> {
-            type Item = &'b mut T;
-            type IntoIter = ColumnIterMut<'b, T>;
-
-            fn into_iter(mut self) -> Self::IntoIter {
-                let size = self.len();
-                Self::IntoIter {
-                    column: unsafe { self.column.as_mut() },
-                    borrow: self.borrow,
-                    size,
-                    next: 0usize,
-                    invariant: PhantomData::default()
-                }
-            }
-        }
-
-        pub struct ColumnIterMut<'b, T> {
-            column: &'b mut Vec<T>,
-            borrow: BorrowRefMut<'b>,
-            size: usize,
-            next: usize,
-            invariant: PhantomData<&'b mut T>,
-        }
-    
-        impl<'b, T: 'b> Iterator for ColumnIterMut<'b, T> {
-            type Item = &'b mut T;
-
-            fn next<'n>(&'n mut self) -> Option<Self::Item> {
-                let val = self.column.get_mut(self.next);
-                self.next = std::cmp::min(self.next + 1, self.size);
-
-                // SAFETY
-                // This is safe because we offer no other interface for accessing the items
-                // we are iterating over, and we promise to only ever yield one mutable
-                // reference to any given element, while upholding runtime borrow checks
-                unsafe { std::mem::transmute::<Option<&mut T>, Option<&'b mut T>>(val) }
-            }
-        }
-
-        const COLUMN_LENGTH_MAXIMUM: usize = 2^14;
-
-        /// The owner of the actual data we are interested in. 
-        #[derive(Default, Debug)]
-        pub struct Column<C: Component> {
-            /// INVARIANT: 
-            /// 
-            /// For an entity in a table, its associated components must
-            /// always occupy the same index in each column. Failure to
-            /// uphold this invariant will result in undefined behavior
-            values: UnsafeCell<Vec<C>>,
-            borrow: BorrowSentinel,
-        }
-
-        impl<C: Component> Display for Column<C> {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "Column\n")?;
-                write!(f, "\t{:?}\n", self.borrow)?;
-                write!(f, "\t{:?}\n", unsafe { &*self.values.get() } )
-            }
-        }
-        
-        impl<'b, C: Component> Column<C> {
-            pub fn new() -> Self {
-                Self {
-                    values: UnsafeCell::new(Vec::new()),
-                    borrow: BorrowSentinel::new(),
-                }
-            }
-            
-            pub fn borrow_column(&'b self) -> ColumnRef<'b, C> {
-                self.try_borrow().expect("column was already mutably borrowed")
-            }
-        
-            fn try_borrow(&'b self) -> Result<ColumnRef<'b, C>, BorrowError> {
-                match BorrowRef::new(&self.borrow) {
-                    Some(borrow) => {
-                        let column = unsafe {
-                            NonNull::new_unchecked(self.values.get())
-                        };
-                        Ok(ColumnRef::new(column, borrow))
-                    },
-                    None => {
-                        Err(BorrowError::AlreadyBorrowed)
-                    },
-                }
-            }
-            
-            pub fn borrow_column_mut(&'b self) -> ColumnRefMut<'b, C> {
-                self.try_borrow_mut().expect("column was already borrowed")
-            }
-            
-            fn try_borrow_mut(&'b self) -> Result<ColumnRefMut<'b, C>, BorrowError> {
-                match BorrowRefMut::new(&self.borrow) {
-                    Some(borrow) => {
-                        let column = unsafe {
-                            NonNull::new_unchecked(self.values.get())
-                        };
-                        Ok(ColumnRefMut::new(column, borrow))
-                    },
-                    None => {
-                        Err(BorrowError::AlreadyBorrowed)
-                    },
-                }
-            }
-            
-            /// Moves a single component from one [Column] to another, if they are the same type
-            pub fn dynamic_move(entity: &EntityId, index: usize, from: &AnyPtr, dest: &AnyPtr) -> Result<usize, DbError> {
-                let mut from = from.downcast_ref::<Column<C>>()
-                    .ok_or(DbError::ColumnTypeDiscrepancy)?.borrow_column_mut();
-                
-                let mut dest = dest.downcast_ref::<Column<C>>()
-                    .ok_or(DbError::ColumnTypeDiscrepancy)?.borrow_column_mut();
-                
-                debug_assert!(from.len() < index);
-                
-                let component = from.remove(index);
-                dest.push(component);
-                Ok(dest.len())
-            }
-
-            /// Resizes the column to hold at least [min_size] components
-            pub fn dynamic_resize(column: &AnyPtr, min_size: usize) -> usize {
-                let real_column = column
-                    .downcast_ref::<Column<C>>()
-                    .expect("column type mismatch in dynamic method call");
-
-                real_column.resize_minimum(min_size)
-            }
-            
-            /// Constructs a [Column] and returns a type erased pointer to it
-            pub fn dynamic_ctor() -> AnyPtr {
-                Box::new(Column::<C>::new())
-            }
-
-            /// Creates a new instance of the component type C at the specified index in the column
-            pub fn dynamic_instance(column: &AnyPtr, index: usize) {
-                // TODO: Just trying to get this working - need some guard rails around here
-                let real_column = column
-                    .downcast_ref::<Column<C>>()
-                    .expect("column type mismatch in dynamic method call");
-
-                let mut column = real_column.borrow_column_mut();
-                column[index] = Default::default();
-            }
-
-            pub fn resize_minimum(&self, min_size: usize) -> usize {
-                let power_of_two_index = std::cmp::max(min_size, 1).next_power_of_two();
-                debug_assert!(power_of_two_index < COLUMN_LENGTH_MAXIMUM);
-
-                let mut column = self.borrow_column_mut();
-                let len = column.len();
-                if min_size >= len {
-                    column.resize_with(power_of_two_index, Default::default);
-                }
-                let new_len = column.len();
-                new_len
-            }
-
-        }
-    } // borrowed ======================================================================
-    use borrowed::*;
     use transfer::TransferGraph;
-    
-    const COMMUTATIVE_HASH_TYPE_ZERO: CommutativeHashValue = 0 as CommutativeHashValue;
-    const COMMUTATIVE_HASH_PRIME: CommutativeHashValue = 0x29233AAB26330D; // 11579208931619597
-
-    /// [CommutativeId]
-    #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    struct CommutativeId(CommutativeHashValue);
-    const COMMUTATIVE_ID_INIT: CommutativeId = CommutativeId(COMMUTATIVE_HASH_PRIME);
-
-    impl CommutativeId {
-        pub fn and(&self, other: &CommutativeId) -> Self {
-            Self::combine(self, other)
-        }
-
-        fn combine(first: &Self, other: &Self) -> Self {
-            debug_assert!(first.non_zero());
-            debug_assert!(other.non_zero());
-
-            CommutativeId(
-                first.0
-                    .wrapping_add(other.0)
-                    .wrapping_add(other.0
-                        .wrapping_mul(first.0))
-            )
-        }
-
-        #[inline(always)]
-        fn non_zero(&self) -> bool {
-            !(self.0 == 0)
-        }
-    }
-
-    impl FromIterator<CommutativeId> for CommutativeId {
-        fn from_iter<T: IntoIterator<Item = CommutativeId>>(iter: T) -> Self {
-            iter.into_iter().fold(COMMUTATIVE_ID_INIT, |acc, x| {
-                CommutativeId::combine(&acc, &x)
-            })
-        }
-    }
-
-    impl FromIterator<CommutativeHashValue> for CommutativeId {
-        fn from_iter<T: IntoIterator<Item = CommutativeHashValue>>(iter: T) -> Self {
-            iter.into_iter().fold(COMMUTATIVE_ID_INIT, |acc, x| {
-                CommutativeId::combine(&acc, &CommutativeId(x))
-            })
-        }
-    }
-
-    impl<'i> FromIterator<&'i CommutativeHashValue> for CommutativeId {
-        fn from_iter<T: IntoIterator<Item = &'i CommutativeHashValue>>(iter: T) -> Self {
-            iter.into_iter().fold(COMMUTATIVE_ID_INIT, |acc, x| {
-                CommutativeId::combine(&acc, &CommutativeId(*x))
-            })
-        }
-    }
-
-    #[test]
-    fn test_commutative_id() {
-        let iter_a = [StableTypeId::of::<f32>(), StableTypeId::of::<f64>()];
-        let iter_aa = [StableTypeId::of::<f64>(), StableTypeId::of::<f32>()];
-        let iter_b = [StableTypeId::of::<i8>(), StableTypeId::of::<i16>()];
-        let iter_c = [StableTypeId::of::<i8>(), StableTypeId::of::<i16>(), StableTypeId::of::<i32>()];
-        let id_a = CommutativeId::from_iter(iter_a.into_iter().map(|i| i.0));
-        let id_aa = CommutativeId::from_iter(iter_aa.into_iter().map(|i| i.0));
-        let id_b = CommutativeId::from_iter(iter_b.into_iter().map(|i| i.0));
-        let id_c = CommutativeId::from_iter(iter_c.into_iter().map(|i| i.0));
-        
-        assert_ne!(id_a, id_b);
-        assert_ne!(id_a, id_c);
-        assert_ne!(id_b, id_c);
-
-        assert_eq!(id_a, id_aa)
-    }
 
     pub trait Component: Default + Debug + 'static {}
     
@@ -488,230 +47,7 @@ pub mod reckoning {
     /// Every entity automatically gets this component upon creation
     impl Component for () {}
 
-    /// Type erased entry into a table which describes a single column
-    /// A column contains one type of component. An single index into a table describes 
-    /// an entity made up of different components in different columns
-    pub struct TableEntry {
-        pub tyid: StableTypeId, // The type id of Column<T>  ([Self::data])
-        pub data: AnyPtr, // Column<T>
-        
-        fn_constructor: fn() -> AnyPtr,
-        fn_instance: fn(&AnyPtr, usize),
-        fn_move: fn(&EntityId, usize, &AnyPtr, &AnyPtr) -> Result<usize, DbError>,
-        fn_resize: fn(&AnyPtr, usize) -> usize,
-    }
     
-    impl<'b> TableEntry {
-        pub fn resize_minimum(&self, min_size: usize) -> usize {
-            (self.fn_resize)(&self.data, min_size)
-        }
-
-        pub fn iter<T: Component>(&'b self) -> borrowed::ColumnIter<'b, T> {
-            debug_assert!(StableTypeId::of::<T>() == self.tyid);
-
-            let column = self.data.downcast_ref::<Column<T>>()
-                .expect("expected matching column types");
-            let column_ref = column.borrow_column();
-            let column_iter = column_ref.into_iter();
-
-            column_iter
-        }
-        
-        pub fn iter_mut<T: Component>(&'b self) -> borrowed::ColumnIterMut<'b, T> {
-            debug_assert!(StableTypeId::of::<T>() == self.tyid);
-
-            let column = self.data.downcast_ref::<Column<T>>()
-                .expect("expected matching column types");
-            let column_mut = column.borrow_column_mut();
-            let column_iter_mut = column_mut.into_iter();
-            
-            column_iter_mut
-        }
-    }
-
-    impl Display for TableEntry {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(f, "table entry")?;
-            write!(f, " type: {} - {}", self.tyid.0, self.tyid.name().unwrap_or("{unknown name}"))
-        }
-    }
-    
-    pub struct Table {
-        family: FamilyId,
-        columns: RwLock<HashMap<CType, TableEntry>>, // hashmap never changes after the table is fully initialized
-        entitym: RwLock<HashMap<EntityId, usize>>,
-        numfree: AtomicUsize,
-        free: Mutex<Vec<usize>>,
-        size: AtomicUsize, // this should be equal to entitym.len()
-    }
-    
-    impl Table {
-        fn new(family: FamilyId) -> Self {
-            Table {
-                family: family,
-                columns: RwLock::new(HashMap::new()),
-                entitym: RwLock::new(HashMap::new()),
-                free: Mutex::new(Vec::new()),
-                numfree: AtomicUsize::new(0),
-                size: AtomicUsize::new(0),
-            }
-        }
-
-        /// Returns a new [Table] with empty columns, retaining only the information needed to construct
-        /// instances of the type erased columns comprising the original [Table]
-        pub fn clone_new(&self, family: FamilyId) -> Self {
-            let columns = self.columns
-                .read()
-                .expect("unable to lock table columns for read")
-                .iter()
-                .map(|(tyid, entry)| {
-                    (*tyid, TableEntry {
-                        tyid: entry.tyid,
-                        data: Box::new((entry.fn_constructor)()),
-                        fn_constructor: entry.fn_constructor,
-                        fn_instance: entry.fn_instance,
-                        fn_move: entry.fn_move,
-                        fn_resize: entry.fn_resize,
-                    })
-                })
-                .collect();
-            
-            Table {
-                family,
-                columns: RwLock::new(columns),
-                entitym: RwLock::new(HashMap::new()),
-                numfree: AtomicUsize::new(0),
-                free: Mutex::new(Vec::new()),
-                size: AtomicUsize::new(0),
-            }
-        }
-        
-        /// Gets the index of the next free row in the table
-        /// expanding the table if necessary
-        fn get_next_free_row(&self) -> usize {
-            // Do we already have a next free row?
-            if self.numfree.load(Ordering::SeqCst) > 0 {
-                match self.free.lock() {
-                    Ok(mut guard) => {
-                        if let Some(free_row) = guard.pop() {
-                            self.numfree.fetch_sub(1, Ordering::SeqCst);
-                            return free_row
-                        }
-                    },
-                    Err(e) => {
-                        panic!("unable tot lock table free row mutex: {:?}", e);
-                    }
-                }
-            }
-            return self.size.load(Ordering::SeqCst);
-        }
-
-        /// Sets a component for an entity
-        fn set_component<C: Component>(
-            &self,
-            entity: &EntityId,
-            component: C
-        ) -> Result<(), DbError>
-        {
-            let component_type = ComponentType::of::<C>();
-            
-            let index = *self.entitym
-                .read()
-                .expect("unable to read table entity map")
-                .get(entity)
-                .ok_or(DbError::EntityNotInTable(*entity, self.family))?;
-
-            let mut column_guard = self.columns.write().expect("unable to acquire column lock");
-            
-            let table_entry = column_guard.entry(component_type).or_insert_with(|| {
-                let column: Column<C> = Column::new();
-                
-                let table_entry = TableEntry {
-                    tyid: StableTypeId::of::<C>(),
-                    data: Box::new(column),
-                    fn_constructor: Column::<C>::dynamic_ctor,
-                    fn_instance: Column::<C>::dynamic_instance,
-                    fn_move: Column::<C>::dynamic_move,
-                    fn_resize: Column::<C>::dynamic_resize,
-                };
-
-                table_entry.resize_minimum(index);
-                table_entry
-            });
-
-            let column = table_entry.data.downcast_ref::<Column<C>>()
-                .ok_or(DbError::ColumnTypeDiscrepancy)?;
-            
-            // Borrow the column, panics if it is already borrowed
-            let mut column_ref = column.borrow_column_mut();
-
-            column_ref[index] = component;
-
-            Ok(())
-        }
-
-        fn move_row(row: &EntityId, dest: &Table) {
-            //for component in self.
-            panic!()
-        }
-
-        pub fn create_instance(&self, entity: &EntityId, index: Option<usize>, column_guard: Option<&ColumnReadGuard>) -> Result<usize, DbError> {
-            let index = index.unwrap_or(self.get_next_free_row());
-            
-            match column_guard {
-                Some(column_guard) => {
-                    column_guard.iter().for_each(|(_, table_entry)| {
-                        let column = &table_entry.data;
-                        (table_entry.fn_instance)(column, index)
-                    });
-                },
-                None => {
-                    let column_guard = self.columns
-                        .read()
-                        .expect("unable to acquire column read lock");
-
-                    column_guard.iter().for_each(|(_, table_entry)| {
-                        let column = &table_entry.data;
-                        (table_entry.fn_instance)(column, index)
-                    });
-                }
-            }
-            Ok(index)
-        }
-
-        fn resize_minimum(&self, min_size: usize, column_guard: &ColumnWriteGuard) -> usize {
-            let mut new_size = 0;
-            for (_ty, table_entry) in column_guard.iter() {
-                new_size = table_entry.resize_minimum(min_size);
-            }
-            return new_size;
-        }
-    }
-
-    impl Display for Table {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(f, "\nTABLE\n")?;
-            write!(f, "family: {}\n", self.family)?;
-            write!(f, "size: {}\n", self.size.load(Ordering::SeqCst))?;
-            write!(f, "num_free: {}\n", self.numfree.load(Ordering::SeqCst))?;
-            
-            {
-                write!(f, "entity_map:\n")?;
-                if let Ok(entity_map) = self.entitym.read() {
-                    for item in entity_map.iter() {
-                        write!(f, " {}->{}\n", item.0, item.1)?;
-                    }
-                }
-            }
-
-            write!(f, "columns:\n")?;
-            let column_guard = self.columns.read().expect("unable to acquire column read lock");
-            for item in column_guard.iter() {
-                write!(f, " {}\n {}", item.0, item.1)?;
-            }
-            write!(f, "\n")
-        }
-    }
 
     pub trait DbMapping<'db> {
         type Guard;
@@ -862,8 +198,12 @@ pub mod reckoning {
     pub struct ComponentType(StableTypeId);
 
     impl ComponentType {
-        const fn of<C: Component>() -> Self {
+        pub const fn of<C: Component>() -> Self {
             Self(StableTypeId::of::<C>())
+        }
+
+        pub fn inner(&self) -> StableTypeId {
+            return self.0
         }
     }
 
@@ -924,54 +264,6 @@ pub mod reckoning {
     enum ComponentDelta {
         Add(ComponentType),
         Rem(ComponentType),
-    }
-
-    #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-    pub struct FamilyId(CommutativeId);
-
-    impl Display for FamilyId {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(f, "{}", self.0.0)
-        }
-    }
-
-    impl<'i> FromIterator<&'i ComponentType> for FamilyId {
-        fn from_iter<T: IntoIterator<Item = &'i ComponentType>>(iter: T) -> Self {
-            FamilyId(CommutativeId::from_iter(iter.into_iter().map(|id| id.0.0)))
-        }
-    }
-
-    /// An immutable set of family id's
-    #[derive(Clone)]
-    pub struct FamilyIdSet {
-        ptr: Arc<FamilyIdSetInner>, // thread-local?
-    }
-
-    impl FamilyIdSet {
-        pub fn contains(&self, id: &FamilyId) -> bool {
-            self.ptr.1.contains(id)
-        }
-
-        pub fn iter(&self) -> impl Iterator<Item = &FamilyId> {
-            self.ptr.1.iter()
-        }
-    }
-
-    impl<'i> FromIterator<FamilyId> for FamilyIdSet {
-        fn from_iter<I: IntoIterator<Item = FamilyId>>(iter: I) -> Self {
-            let set: FamilyIdSetImpl = iter.into_iter().collect();
-            let set_id = CommutativeId::from_iter(set.iter().map(|id| id.0));
-            FamilyIdSet { ptr: Arc::new((set_id, set)) }
-        }
-    }
-
-    impl<'i, I> From<I> for FamilyIdSet
-    where
-        I: IntoIterator<Item = &'i FamilyId>,
-    {
-        fn from(into_iter: I) -> Self {
-            FamilyIdSet::from_iter(into_iter.into_iter().cloned())
-        }
     }
 
     pub struct Family {
@@ -1314,7 +606,6 @@ pub mod reckoning {
                             family
                         },
                         None => {
-                            // we have to create a new family
                             self.new_family(new_components)?
                         }
                     };
@@ -1342,16 +633,20 @@ pub mod reckoning {
             &self,
             components: ComponentTypeSet,
         ) -> Result<FamilyId, DbError> {
+            println!("CREATING NEW FAMILY");
+
             let family_id = FamilyId::from_iter(components.iter());
             {
                 let mut guard = self.tables.write()
                     .map_err(|e| DbError::UnableToAcquireTablesLock(e.to_string()))?;
                 
                 if let Some(base_table) = guard.get(&family_id) {
+                    println!("USING BASE TABLE");
+
                     let cloned_table = base_table.clone_new(family_id);
                     
                     {
-                        let mut cloned_table_columns_guard = cloned_table.columns
+                        let mut cloned_table_columns_guard = cloned_table.columns()
                             .write()
                             .expect("unable to lock cloned table columns for write");
                         
@@ -1483,7 +778,7 @@ pub mod reckoning {
                         .get(&curr_family)
                         .ok_or(DbError::TableDoesntExistForFamily(curr_family))?;
 
-                    if let Ok(col_from_guard) = data_table_from.columns.try_read() {
+                    if let Ok(col_from_guard) = data_table_from.columns().try_read() {
                         from_columns_map_guard = col_from_guard;
                     } else {
                         continue;
@@ -1493,19 +788,19 @@ pub mod reckoning {
                         .get(&dest_family)
                         .ok_or(DbError::TableDoesntExistForFamily(dest_family))?;
 
-                    if let Ok(col_dest_guard) = data_table_dest.columns.try_read() {
+                    if let Ok(col_dest_guard) = data_table_dest.columns().try_read() {
                         dest_columns_map_guard = col_dest_guard;
                     } else {
                         continue;
                     }
 
-                    if let Ok(map_from_guard) = data_table_from.entitym.try_write() {
+                    if let Ok(map_from_guard) = data_table_from.entity_map().try_write() {
                         from_entity_map_guard = map_from_guard;
                     } else {
                         continue;
                     }
 
-                    if let Ok(map_dest_guard) = data_table_dest.entitym.try_write() {
+                    if let Ok(map_dest_guard) = data_table_dest.entity_map().try_write() {
                         dest_entity_map_guard = map_dest_guard;
                     } else {
                         continue;
@@ -1648,592 +943,6 @@ pub mod reckoning {
             Remove(FamilyId),
         }
     } // transfer ======================================================================
-
-    pub mod conflict {
-        use std::{collections::{HashSet, HashMap, hash_map::IntoValues}, cell::{Cell, RefCell}, marker::PhantomData, ops::{Deref, DerefMut}};
-
-        pub trait Dependent {
-            type Dependency: PartialEq + Eq + std::hash::Hash;
-            
-            // The 'iter lifetime associated with these two functions deserves to
-            // be reviewed. The only reason this trait is structured this way is
-            // to avoid polluting the code with additional lifetimes. The resulting
-            // compromise is that [Self::Dependency]'s yielded by the returned
-            // iterators must be copied or cloned, they cannot yield references
-            fn dependencies<'iter>(&'iter self) -> impl Iterator<Item = Self::Dependency> + 'iter;
-            fn exclusive_dependencies<'iter>(&'iter self) -> impl Iterator<Item = Self::Dependency> + 'iter {
-                std::iter::empty()
-            }
-        }
-        
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        pub struct ConflictColor(usize);
-        impl ConflictColor {
-            fn as_usize(&self) -> usize {
-                self.0
-            }
-        }
-
-        #[derive(Debug)]
-        pub struct ConflictGraphNode<K, V, D> {
-            key: K,
-            val: V,
-            dep: HashSet<D>,
-            exc: HashSet<D>,
-            edges: RefCell<HashSet<usize>>,
-            color: Cell<Option<ConflictColor>>,
-        }
-
-        #[derive(Debug)]
-        pub struct Init<K, V, D>(Vec<ConflictGraphNode<K, V, D>>);
-
-        impl<K, V, D> Init<K, V, D> {
-            fn new() -> Self {
-                Self(Vec::new())
-            }
-        }
-
-        impl<K, V, D> Deref for Init<K, V, D> {
-            type Target = Vec<ConflictGraphNode<K, V, D>>;
-
-            fn deref(&self) -> &Self::Target {
-                &self.0
-            }
-        }
-
-        impl<K, V, D> DerefMut for Init<K, V, D> {
-            fn deref_mut(&mut self) -> &mut Self::Target {
-                &mut self.0
-            }
-        }
-
-        type Buckets<K, V> = HashMap<usize, Vec<(K, V)>>;
-
-        #[derive(Debug)]
-        pub struct Built<K, V> {
-            buckets: Buckets<K, V>
-        }
-
-        /// A [ConflictGraph] is an expensive structure to build, and once it's built
-        /// it is considered entirely immutable, in addition, the data needed to
-        /// build the graph and the data needed to query a built graph is different.
-        /// Because of these properties, we use type-state to encode an initializing
-        /// state and a built state directly into the type system, with different
-        /// exposed methods and different internal representations on the two
-        pub trait ConflictGraphState {}
-        impl<K, V, D> ConflictGraphState for Init<K, V, D> {}
-        impl<K, V> ConflictGraphState for Built<K, V> {}
-
-        const COLOR_ZERO: ConflictColor = ConflictColor(0);
-        
-        #[derive(Debug)]
-        pub struct ConflictGraph<K, V: Dependent, State: ConflictGraphState = Init<K, V, <V as Dependent>::Dependency>> {
-            state: State,
-            _k: PhantomData<K>,
-            _v: PhantomData<V>,
-        }
-
-        impl<'g, K, V> ConflictGraph<K, V, Init<K, V, <V as Dependent>::Dependency>>
-        where
-            V: Dependent,
-            K: Clone + PartialEq + Eq,
-            K: std::hash::Hash,
-        {
-            pub fn new() -> Self {
-                Self {
-                    state: Init::new(),
-                    _k: PhantomData::default(),
-                    _v: PhantomData::default(),
-                }
-            }
-
-            pub fn insert(&mut self, key: K, val: V) {
-                let dep: HashSet<V::Dependency> = val.dependencies()
-                                                     .collect();
-                
-                let exc: HashSet<V::Dependency> = val.exclusive_dependencies()
-                                                     .collect();
-                
-                self.state.push(ConflictGraphNode {
-                    key,
-                    val,
-                    dep,
-                    exc,
-                    edges: RefCell::new(HashSet::new()),
-                    color: Cell::new(None),
-                });
-
-                self.resolve_edges()                
-            }
-            
-            /// Create edges where nodes have exclusive dependencies which conflict
-            /// with other nodes dependencies or exclusive dependencies
-            fn resolve_edges(&mut self) {
-                for (first_index, first)
-                in self.state.iter().enumerate() {
-
-                    for (other_index, other)
-                    in self.state.iter().enumerate() {
-
-                        // If we are pointing at ourself, go to the next iteration
-                        if std::ptr::eq(first, other) { continue; }
-                        
-                        for exc in first.exc.iter() {
-                            // Chained iterator iterates all of the dependencies and
-                            // exclusive dependencies of our other node, we compare
-                            // each iterated item with the current exclusive
-                            // dependency of the current iterated node
-                            for dep 
-                            in other.dep.iter()
-                                        .chain(other.exc.iter()) {
-                                if exc == dep {
-                                    // We are using a hashset to store edges, thus
-                                    // duplicates are handled implicitly and we ignore
-                                    first.edges.borrow_mut().insert(other_index);
-                                    other.edges.borrow_mut().insert(first_index);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            fn color(&mut self) {
-                let nodes = &self.state;
-                let mut uncolored = nodes.len();
-                let mut palette = Vec::from([COLOR_ZERO]);
-
-                while let Some(node) = self.pick_next() {
-                    let mut available_colors = palette.clone();
-
-                    for neighbor_color 
-                    in node.edges.borrow()
-                                 .iter()
-                                 .filter_map(|i|
-                                    nodes.get(*i)
-                                         .and_then(|n| 
-                                            n.color.get())) {
-                        
-                        if let Some(pos) = available_colors.iter()
-                                                                  .position(|c| *c == neighbor_color) {
-                            available_colors.remove(pos);
-                        }
-                    }
-
-                    if let Some(color) = available_colors.first() {
-                        node.color.set(Some(*color));
-                    } else {
-                        palette.push(ConflictColor(palette.len()));
-                        node.color.set(Some(*palette.last().expect("expected color")));
-                    }
-
-                    uncolored -= 1;
-                }
-                debug_assert!(uncolored == 0);
-            }
-            
-            fn pick_next(&self) -> Option<&ConflictGraphNode<K, V, <V as Dependent>::Dependency>> {
-                let nodes = &self.state;
-                let mut candidate: Option<&ConflictGraphNode<K, V, <V as Dependent>::Dependency>> = None;
-                let (mut candidate_colored, mut candidate_uncolored) = (0, 0);
-                
-                for node in nodes.iter() {
-                    
-                    // skip already colored nodes
-                    if node.color.get().is_some() { continue; }
-                    
-                    // sums colored and uncolored neighbors for this node
-                    let (colored, uncolored) = node.edges
-                            .borrow()
-                            .iter()
-                            .filter_map(|i| nodes.get(*i))
-                            .fold((0, 0), |(mut c, mut u), x| {
-                                x.color.get()
-                                    .and_then(|v| { c += 1; Some(v) })
-                                    .or_else(|| { u += 1; None });
-                                (c, u) 
-                            });
-                    
-                    if (colored > candidate_colored) || ((colored == candidate_colored) && (uncolored > candidate_uncolored)) {
-                        // this is our new candidate
-                        candidate_colored = colored;
-                        candidate_uncolored = uncolored;
-                        candidate = Some(node);
-                        continue;
-                    } else {
-                        // if we have no candidate at all, pick this one
-                        if candidate.is_none() {
-                            candidate = Some(node);
-                        }
-                        continue;
-                    }
-                }
-                candidate
-            }
-
-            pub fn build(mut self) -> ConflictGraph<K, V, Built<K, V>> {
-                self.color();
-
-                let mut buckets = HashMap::new();
-                
-                // destructively iterate the state and fill up our buckets
-                for node in self.state.0.into_iter() {
-                    let color = node.color.get().expect("please report this bug - all nodes must be colored");
-                    
-                    // we're wrapping kv in an Option to use the take().unwrap()
-                    // methods to bypass a deficiency with borrow-checking in the
-                    // entry API
-                    let mut kv = Some((node.key, node.val));
-
-                    buckets.entry(color.as_usize())
-                           .and_modify(|e: &mut Vec<(K, V)>| e.push(kv.take().unwrap()))
-                           .or_insert_with(|| vec![kv.take().unwrap()]);
-                }
-
-                ConflictGraph {
-                    state: Built {
-                        buckets
-                    },
-                    _k: PhantomData,
-                    _v: PhantomData,
-                }
-            }
-        }
-
-        impl<'g, K, V> ConflictGraph<K, V, Built<K, V>>
-        where
-            V: Dependent
-        {
-            /// Returns an iterator over separate collections of non-conflicting items
-            pub fn iter(&self) -> impl Iterator<Item = &Vec<(K, V)>> {
-                self.state.buckets.values()
-            }
-        }
-        
-        impl<K, V> IntoIterator for ConflictGraph<K, V, Built<K, V>>
-        where
-            V: Dependent
-        {
-            type Item = Vec<(K, V)>;
-            type IntoIter = IntoValues<usize, Vec<(K, V)>>;
-
-            fn into_iter(self) -> Self::IntoIter {
-                self.state.buckets.into_values()
-            }
-        }
-
-        pub struct ConflictGraphIter<'g, K, T> {
-            colors: &'g HashMap<K, T>,
-        }
-
-        impl<'g, K, T> Iterator for ConflictGraphIter<'g, K, T>
-        where
-            T: 'g,
-            K: 'g,
-        {
-            type Item = &'g [(K, T)];
-
-            fn next(&mut self) -> Option<Self::Item> {
-                todo!()
-            }
-        }
-        
-        #[cfg(test)]
-        mod test {
-            use super::{Dependent, ConflictGraph};
-
-            #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
-            enum Dep {
-                Blue,
-                Yellow,
-                Green,
-                Cyan,
-                White,
-            }
-
-            #[derive(Debug)]
-            struct Consumer {
-                r: Vec<Dep>,
-                w: Vec<Dep>,
-            }
-            impl Dependent for Consumer {
-                type Dependency = Dep;
-
-                fn dependencies(&self) -> impl Iterator<Item = Self::Dependency> {
-                    self.r.clone().into_iter()
-                }
-
-                fn exclusive_dependencies(&self) -> impl Iterator<Item = Self::Dependency> {
-                    self.w.clone().into_iter()
-                }
-            }
-            
-            #[test]
-            fn build_conflict_graph() {
-                let resources = [
-                    Consumer { r: vec![Dep::Cyan], w: vec![Dep::Blue] },
-                    Consumer { r: vec![Dep::Cyan], w: vec![Dep::Yellow] },
-                    Consumer { r: vec![Dep::Cyan], w: vec![Dep::Green] },
-                    Consumer { r: vec![Dep::Cyan, Dep::White], w: vec![Dep::Blue] },
-                    
-                    Consumer { r: vec![], w: vec![Dep::White] },
-                    Consumer { r: vec![], w: vec![Dep::Yellow] },
-
-                    Consumer { r: vec![Dep::Cyan], w: vec![] },
-                    Consumer { r: vec![Dep::Blue], w: vec![] },
-                    Consumer { r: vec![Dep::Cyan, Dep::Blue], w: vec![] },
-                    Consumer { r: vec![Dep::Blue, Dep::Green], w: vec![] },
-                    
-                    Consumer { r: vec![Dep::Green], w: vec![] },
-                    Consumer { r: vec![Dep::Yellow], w: vec![] },
-                ];
-
-                let mut graph = ConflictGraph::new();
-                
-                for (index, resource) in resources.into_iter().enumerate() {
-                    graph.insert(index, resource);
-                }
-
-                let conflict_free = graph.build();
-                
-                for (index, bucket) in conflict_free.iter().enumerate() {
-                    println!("bucket: {}", index);
-                    for (i, consumer) in bucket {
-                        let s_writes = format!("*{:?}*", consumer.w);
-                        println!("\t\t{:3}:{:24}{:?}", i, s_writes, consumer.r);
-                    }
-                }
-            }
-        }
-    } // conflict ======================================================================
-
-    /// Transformations
-    /// 
-    /// Functionality related to transforming data contained in an
-    /// [crate::database::reckoning::EntityDatabase]
-    pub mod transform {
-        use std::collections::HashMap;
-        use std::hash::Hash;
-        use std::marker::PhantomData;
-        use crate::database::ComponentType;
-        use crate::database::ConflictGraph;
-        use crate::database::Dependent;
-
-        use super::FamilyId;
-        use super::FamilyIdSet;
-        use super::Component;
-        use super::EntityDatabase;
-
-        pub struct Phase {
-            subphases: Vec<HashMap<TransformationId, DynTransform>>,
-        }
-
-        impl Phase {
-            pub fn new() -> Self {
-                Phase {
-                    subphases: Vec::new()
-                }
-            }
-
-            pub fn add_transformation<T>(&mut self, tr: T)
-            where
-                T: Transformation,
-            {
-                // TODO:
-                // Rebuilding the graph with every insert is super inefficient,
-                // some sort of from_iter implementation or a defered building
-                // of the conflict graph would help here
-                
-                let reads = T::Data::READS
-                    .iter()
-                    .cloned()
-                    .filter_map(|item| item)
-                    .collect();
-                let writes = T::Data::WRITES
-                    .iter()
-                    .cloned()
-                    .filter_map(|item| item)
-                    .collect();
-
-                let dyn_transform = DynTransform {
-                    ptr: Box::new(tr),
-                    reads,
-                    writes,
-                }; // ========== Inject Read/Write requirements here
-
-                let transform_tuple = (T::id(), dyn_transform);
-
-                // Resolve conflicts each time we add a transformation
-                let transforms: Vec<(TransformationId, DynTransform)> = self.subphases
-                    .drain(..)
-                    .flatten()
-                    .chain([transform_tuple].into_iter())
-                    .collect();
-
-                let mut graph = ConflictGraph::new();
-                
-                transforms.into_iter()
-                          .for_each(|(k, v)| graph.insert(k, v));
-                
-                let deconflicted = graph.build();
-                
-                deconflicted.into_iter().for_each(|bucket| {
-                    let subphase: HashMap<TransformationId, DynTransform> = HashMap::from_iter(bucket.into_iter());
-                    self.subphases.push(subphase);
-                });
-            }
-
-            pub fn run_on(&mut self, _db: &EntityDatabase) -> PhaseResult {
-                for _ in self.subphases.iter_mut() {
-                    todo!()
-                    // queue jobs one subphase at a time
-                }
-                Ok(())
-            }
-        }
-
-        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        pub struct TransformationId(std::any::TypeId);
-        
-        pub trait Transformation: 'static {
-            type Data: Selection;
-            fn run(data: Rows<Self::Data>) -> TransformationResult;
-            fn messages(_: Messages) { todo!() }
-            
-            /// Returns a unique identifier for a given transformation impl
-            fn id() -> TransformationId where Self: 'static {
-                TransformationId(std::any::TypeId::of::<Self>())
-            }
-        }
-
-        pub trait Runs {
-            fn run_on(&self, db: &EntityDatabase) -> TransformationResult;
-        }
-        
-        impl<RTuple> Runs for RTuple
-        where
-            RTuple: Transformation,
-            RTuple::Data: Selection,
-        {
-            fn run_on(&self, db: &EntityDatabase) -> TransformationResult {
-                let rows = RTuple::Data::as_rows::<RTuple::Data>(db);
-                RTuple::run(rows)
-            }
-        }
-        
-        struct DynTransform {
-            ptr: Box<dyn Runs>,
-            reads: Vec<ComponentType>,
-            writes: Vec<ComponentType>,
-        }
-
-        impl Dependent for DynTransform {
-            type Dependency = ComponentType;
-
-            fn dependencies<'iter>(&'iter self) -> impl Iterator<Item = Self::Dependency> + 'iter {
-                self.reads.iter().cloned()
-            }
-
-            fn exclusive_dependencies<'iter>(&'iter self) -> impl Iterator<Item = Self::Dependency> + 'iter {
-                self.writes.iter().cloned()
-            }
-        }
-
-        pub struct Read<C: Component> { marker: PhantomData<C>, }
-        pub struct Write<C: Component> { marker: PhantomData<C>, }
-        pub trait ReadWrite {}
-        impl<C> ReadWrite for Read<C> where C: Component {}
-        impl<C> ReadWrite for Write<C> where C: Component {}
-        pub trait MetaData {}
-        impl<'db, C> MetaData for Read<C> where C: Component {}
-        impl<'db, C> MetaData for Write<C> where C: Component {}
-        
-        pub struct RowIter<'db, RTuple> {
-            pub(crate) db: &'db EntityDatabase,
-            pub(crate) family: FamilyId,
-            pub(crate) marker: PhantomData<RTuple>,
-        }
-
-        impl<'db, RTuple> RowIter<'db, RTuple> {
-            pub fn new(db: &'db EntityDatabase, family: FamilyId) -> Self {
-                Self { db, family, marker: PhantomData::default() }
-            }
-        }
-        
-        #[const_trait]
-        pub trait SelectOne<'db> {
-            type Ref;
-            type Type;
-            fn reads() -> Option<ComponentType> { None }
-            fn writes() -> Option<ComponentType> { None }
-        }
-
-        impl<'db, C> const SelectOne<'db> for Read<C>
-        where
-            Self: 'db,
-            C: Component,
-        {
-            type Type = C;
-            type Ref = &'db Self::Type;
-
-            fn reads() -> Option<ComponentType> {
-                Some(ComponentType::of::<Self::Type>())
-            }
-        }
-
-        impl<'db, C> const SelectOne<'db> for Write<C>
-        where
-            Self: 'db,
-            C: Component,
-        {
-            type Type = C;
-            type Ref = &'db mut Self::Type;
- 
-            fn writes() -> Option<ComponentType> {
-                Some(ComponentType::of::<Self::Type>())
-            }
-        }
-
-        pub trait Selection {
-            fn as_rows<'db, T>(db: &'db EntityDatabase) -> Rows<'db, T> {
-                
-                #![allow(unreachable_code, unused_variables)] todo!("actually get a family id set");
-
-                //crate::database::Rows {
-                //    db,
-                //    fs,
-                //    marker: PhantomData::default(), 
-                //}
-            }
-
-            const READS: &'static [Option<ComponentType>];
-            const WRITES: &'static [Option<ComponentType>];
-        }
-
-        pub struct Rows<'db, RTuple> {
-            db: &'db EntityDatabase,
-            fs: FamilyIdSet,
-            marker: PhantomData<RTuple>,
-        }
-
-        impl<'db, RTuple> Rows<'db, RTuple> {
-            pub fn database(&self) -> &'db EntityDatabase { self.db }
-            pub fn families(&self) -> FamilyIdSet { self.fs.clone() }
-        }
-        
-        pub struct Messages {}
-        pub trait RwData {}
-        pub struct ReadIter {}
-        pub struct WriteIter {}
-        pub trait Reads {}
-        pub trait Writes {}
-        pub struct RwSet {}
-
-        #[derive(Debug)]
-        pub enum TransformationError {}
-        pub type TransformationResult = Result<(), TransformationError>;
-        pub type PhaseResult = Result<(), Vec<TransformationError>>;
-    } // transformations ===============================================================
     
     /// Macros
     /// 
@@ -2316,19 +1025,19 @@ pub mod reckoning {
 } // reckoning =========================================================================
 
 // Exports
-pub use reckoning::transform;
-pub use reckoning::transform::Rows;
-pub use reckoning::transform::MetaData;
-pub use reckoning::transform::SelectOne;
-pub use reckoning::transform::Selection;
-pub use reckoning::transform::RowIter;
-pub use reckoning::conflict;
-pub use reckoning::conflict::ConflictGraph;
-pub use reckoning::conflict::ConflictColor;
-pub use reckoning::conflict::Dependent;
-pub use reckoning::Component;
-pub use reckoning::ComponentType;
-pub use reckoning::EntityDatabase;
+pub use crate::transform;
+pub use crate::transform::Rows;
+pub use crate::transform::MetaData;
+pub use crate::transform::SelectOne;
+pub use crate::transform::Selection;
+pub use crate::transform::RowIter;
+pub use crate::conflict;
+pub use crate::conflict::ConflictGraph;
+pub use crate::conflict::ConflictColor;
+pub use crate::conflict::Dependent;
+pub use crate::database::reckoning::Component;
+pub use crate::database::reckoning::ComponentType;
+pub use crate::database::reckoning::EntityDatabase;
 
 // Macro Impl's
 impl_transformations!([A, 0]);
@@ -2345,11 +1054,13 @@ impl_transformations!([A, 0], [B, 1], [C, 2], [D, 3], [E, 4], [F, 5], [G, 6], [H
 #[cfg(test)]
 #[allow(dead_code)]
 mod vehicle_example {
-    use std::default;
+    #[allow(dead_code)]
+    #[allow(unused_assignments)]
+    #[allow(unused_variables)]
 
     use super::reckoning::*;
-    use super::reckoning::transform::*;
-
+    use super::transform::*;
+    
     #[derive(Debug, Default)]
     pub struct Physics {
         pos: f64,

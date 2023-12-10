@@ -12,23 +12,26 @@
 
 #[macro_use]
 pub(crate) mod macros;
-pub(crate) mod id;
-pub(crate) mod db;
-pub(crate) mod comps;
-pub(crate) mod family;
-pub(crate) mod xform;
+pub mod id;
+pub mod borrowed;
+pub mod table;
+pub mod transform;
+pub mod conflict;
+
+//pub(crate) mod db;
+//pub(crate) mod comps;
+//pub(crate) mod family;
+//pub(crate) mod xform;
 
 pub(crate) mod database; // replaces db
 
-#[cfg(test)] mod test;
-
-pub use db::EntityDatabase;
+//pub use db::EntityDatabase;
 pub use id::EntityId;
-pub use comps::Component;
-pub use xform::Read;
-pub use xform::Write;
-pub use xform::Phase;
-pub use xform::Transformation;
-pub use xform::TransformError;
-pub use xform::TransformSuccess;
-pub use xform::TransformResult;
+//pub use comps::Component;
+//pub use xform::Read;
+//pub use xform::Write;
+//pub use xform::Phase;
+//pub use xform::Transformation;
+//pub use xform::TransformError;
+//pub use xform::TransformSuccess;
+//pub use xform::TransformResult;
