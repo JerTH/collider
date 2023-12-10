@@ -352,10 +352,7 @@ pub mod reckoning {
             }
             
             /// Moves a single component from one [Column] to another, if they are the same type
-            pub fn dynamic_move(entity: &EntityId, index: usize, from: &AnyPtr, dest: &AnyPtr)
-                -> Result<usize, DbError> {
-                println!("DYNAMIC MOVE {}, {}", entity, index);
-                
+            pub fn dynamic_move(entity: &EntityId, index: usize, from: &AnyPtr, dest: &AnyPtr) -> Result<usize, DbError> {
                 let mut from = from.downcast_ref::<Column<C>>()
                     .ok_or(DbError::ColumnTypeDiscrepancy)?.borrow_column_mut();
                 
@@ -371,8 +368,6 @@ pub mod reckoning {
 
             /// Resizes the column to hold at least [min_size] components
             pub fn dynamic_resize(column: &AnyPtr, min_size: usize) -> usize {
-                println!("dynamic resize");
-
                 let real_column = column
                     .downcast_ref::<Column<C>>()
                     .expect("column type mismatch in dynamic method call");
@@ -400,8 +395,6 @@ pub mod reckoning {
                 let power_of_two_index = std::cmp::max(min_size, 1).next_power_of_two();
                 debug_assert!(power_of_two_index < COLUMN_LENGTH_MAXIMUM);
 
-                println!("making room for {} items with {} spaces", min_size, power_of_two_index);
-                
                 let mut column = self.borrow_column_mut();
                 let len = column.len();
                 if min_size >= len {
@@ -564,6 +557,35 @@ pub mod reckoning {
             }
         }
 
+        /// Returns a new [Table] with empty columns, retaining only the information needed to construct
+        /// instances of the type erased columns comprising the original [Table]
+        pub fn clone_new(&self, family: FamilyId) -> Self {
+            let columns = self.columns
+                .read()
+                .expect("unable to lock table columns for read")
+                .iter()
+                .map(|(tyid, entry)| {
+                    (*tyid, TableEntry {
+                        tyid: entry.tyid,
+                        data: Box::new((entry.fn_constructor)()),
+                        fn_constructor: entry.fn_constructor,
+                        fn_instance: entry.fn_instance,
+                        fn_move: entry.fn_move,
+                        fn_resize: entry.fn_resize,
+                    })
+                })
+                .collect();
+            
+            Table {
+                family,
+                columns: RwLock::new(columns),
+                entitym: RwLock::new(HashMap::new()),
+                numfree: AtomicUsize::new(0),
+                free: Mutex::new(Vec::new()),
+                size: AtomicUsize::new(0),
+            }
+        }
+        
         /// Gets the index of the next free row in the table
         /// expanding the table if necessary
         fn get_next_free_row(&self) -> usize {
@@ -591,8 +613,6 @@ pub mod reckoning {
             component: C
         ) -> Result<(), DbError>
         {
-            println!("setting component");
-
             let component_type = ComponentType::of::<C>();
             
             let index = *self.entitym
@@ -638,20 +658,14 @@ pub mod reckoning {
         pub fn create_instance(&self, entity: &EntityId, index: Option<usize>, column_guard: Option<&ColumnReadGuard>) -> Result<usize, DbError> {
             let index = index.unwrap_or(self.get_next_free_row());
             
-            println!("got next index: {}", index);
-
             match column_guard {
                 Some(column_guard) => {
-                    println!("using provided column lock guard");
-
                     column_guard.iter().for_each(|(_, table_entry)| {
                         let column = &table_entry.data;
                         (table_entry.fn_instance)(column, index)
                     });
                 },
                 None => {
-                    println!("attempting to acquire column lock");
-                    
                     let column_guard = self.columns
                         .read()
                         .expect("unable to acquire column read lock");
@@ -1163,16 +1177,11 @@ pub mod reckoning {
             // setup the unit/null component family
             let unit_family_set = ComponentTypeSet::from_iter([ComponentType::of::<()>()]);
             let family_id = db.new_family(unit_family_set).expect("please report this bug - unable to create unit component family");
-
-            println!("setup debug/null family: {:?}", family_id);
-
             db
         }
 
         /// Creates an entity, returning its [EntityId]
         pub fn create(&self) -> Result<EntityId, CreateEntityError> {
-            println!("creating entity");
-
             let entity = self.allocator.alloc().map_err(|_| {
                 CreateEntityError::IdAllocatorError
             })?;
@@ -1199,7 +1208,7 @@ pub mod reckoning {
                         table.create_instance(&entity, None, None)?;
                     },
                     Err(e) => {
-                        println!("failed to create entity: {}", e);
+                        panic!("failed to create entity, poisoned rwlock {}", e);
                     }
                 }
             }
@@ -1221,18 +1230,9 @@ pub mod reckoning {
             let cty = ComponentType::of::<C>();
             let delta = ComponentDelta::Add(cty);
 
-            println!("adding component of type {} to {:?}", cty, entity);
-            
             let cur_family = self.maps.get::<(EntityId, FamilyId)>(&entity);
-            println!("  {:?} currently belongs to family {:?}", entity, cur_family);
-            
             let new_family = self.find_new_family(&entity, &delta)?;
-            if new_family == cur_family.unwrap() {
-                println!("  no need to move {:?} as it already belongs to {:?}", entity, new_family);
-            } else {
-                println!("  moving {:?} from {:?} to {:?}", entity, cur_family, new_family);
-            }
-
+            
             self.resolve_entity_transfer(&entity, &new_family)?;
             self.set_component_for(&entity, component)?;
             
@@ -1299,7 +1299,6 @@ pub mod reckoning {
                     .ok_or(DbError::EntityBelongsToUnknownFamily)?;
 
                 if components.contains(&component) {
-                    println!("family already contains {}", component);
                     return Ok(*current)
                 } else {
                     let new_components_iter =
@@ -1310,14 +1309,12 @@ pub mod reckoning {
 
                     let new_components = ComponentTypeSet::from_iter(new_components_iter);
 
-                    println!("new component set names: {}", new_components.names());
-                    println!("new component type set id: {}", new_components.id);
-
                     let family = match self.maps.get::<(ComponentTypeSet, FamilyId)>(&new_components) {
                         Some(family) => {
                             family
                         },
                         None => {
+                            // we have to create a new family
                             self.new_family(new_components)?
                         }
                     };
@@ -1343,21 +1340,30 @@ pub mod reckoning {
         /// Creates a new family, sets up the default db mappings for the family
         fn new_family(
             &self,
-            components: ComponentTypeSet
+            components: ComponentTypeSet,
         ) -> Result<FamilyId, DbError> {
-            println!("creating new family for component set {}", components.names());
-            
             let family_id = FamilyId::from_iter(components.iter());
-
-            println!("new family id: {:?}", family_id);
-
-            
             {
                 let mut guard = self.tables.write()
                     .map_err(|e| DbError::UnableToAcquireTablesLock(e.to_string()))?;
                 
-                let table = Table::new(family_id);
-                guard.insert(family_id, table);
+                if let Some(base_table) = guard.get(&family_id) {
+                    let cloned_table = base_table.clone_new(family_id);
+                    
+                    {
+                        let mut cloned_table_columns_guard = cloned_table.columns
+                            .write()
+                            .expect("unable to lock cloned table columns for write");
+                        
+                        for (tyid, table_entry) in cloned_table_columns_guard.iter_mut() {
+                            table_entry.data = (table_entry.fn_constructor)()
+                        }
+                    }
+
+                    guard.insert(family_id, cloned_table);
+                } else {
+                    guard.insert(family_id, Table::new(family_id));
+                }
             }
             
             // We map each family to the set of components it represents
@@ -1443,7 +1449,6 @@ pub mod reckoning {
             entity: &EntityId,
             family: &FamilyId
         ) -> Result<(), DbError> {
-            println!("resolve entity transfer");
 
             let curr_family: FamilyId = self.maps.get::<(EntityId, FamilyId)>(entity)
                 .ok_or(DbError::EntityDoesntExist(*entity))?;
@@ -1461,12 +1466,12 @@ pub mod reckoning {
                 // guard scope
                 loop {
                     let table_guard;
-                    let mut entity_map_from_guard;
-                    let mut entity_map_dest_guard;
+                    let mut from_entity_map_guard;
+                    let mut dest_entity_map_guard;
                     let data_table_from;
                     let data_table_dest;
-                    let column_from_guard;
-                    let column_dest_guard;
+                    let from_columns_map_guard;
+                    let dest_columns_map_guard;
                     
                     if let Ok(tab_guard) = self.tables.try_read() {
                         table_guard = tab_guard;
@@ -1479,71 +1484,60 @@ pub mod reckoning {
                         .ok_or(DbError::TableDoesntExistForFamily(curr_family))?;
 
                     if let Ok(col_from_guard) = data_table_from.columns.try_read() {
-                        column_from_guard = col_from_guard;
+                        from_columns_map_guard = col_from_guard;
                     } else {
                         continue;
                     }
-
+                    
                     data_table_dest = table_guard
                         .get(&dest_family)
                         .ok_or(DbError::TableDoesntExistForFamily(dest_family))?;
 
                     if let Ok(col_dest_guard) = data_table_dest.columns.try_read() {
-                        column_dest_guard = col_dest_guard;
+                        dest_columns_map_guard = col_dest_guard;
                     } else {
                         continue;
                     }
 
                     if let Ok(map_from_guard) = data_table_from.entitym.try_write() {
-                        entity_map_from_guard = map_from_guard;
+                        from_entity_map_guard = map_from_guard;
                     } else {
                         continue;
                     }
 
                     if let Ok(map_dest_guard) = data_table_dest.entitym.try_write() {
-                        entity_map_dest_guard = map_dest_guard;
+                        dest_entity_map_guard = map_dest_guard;
                     } else {
                         continue;
                     }
 
-                    println!("acquired locks to resolve entity transfer");
 
                     // If we've successfully locked everything we need this loop, we can proceeed
-                    //if let Some(_) = entity_map_from_guard.remove(entity) {
-                        entity_map_from_guard.remove(entity);
-                        println!("removed entity from old table map");
-                        
-                        // The entity should exist in this table, as it has an index,
-                        // we've removed its mapping in its old table, now lets move
-                        // its data and then patch up the new tables mapping, as well as
-                        // any other dbmaps we might be concerned about
-                            
-                        let new_entity_index = data_table_dest.get_next_free_row();
-
-                        // Move the entity from one table to the other, column by column.
-                        // This data is type-erased so we use a special "move" function pointer
-                        // we created with each column that knows what to do. We have to tell the
-                        // column in which to store the entity, however, as it's decided by the
-                        // table itself
-                        for (component_type, table_entry_from) in column_from_guard.iter() {
-                            println!("QQQ");
-                            println!("checking table for matching column...");
-
-                            if let Some(table_entry_dest) = column_dest_guard.get(component_type) {
-                                println!("moving component");
-                                let index = (table_entry_from.fn_move)(entity, new_entity_index, &table_entry_from.data, &table_entry_dest.data)?;
-                            } else {
-                                println!("create instance");
-                                data_table_dest.create_instance(entity, Some(new_entity_index), Some(&column_dest_guard))?;
-                            }
-                        }
-                        println!("||| setting new entity index");
-                        entity_map_dest_guard.insert(*entity, new_entity_index);
-                        println!("\nEMFG:::{:?}", entity_map_from_guard);
-                        println!("EMDG:::{:?}", entity_map_dest_guard);
-                    //}
+                    from_entity_map_guard.remove(entity);
                     
-                    println!("patching db maps for entity transfer");
+                    // The entity should exist in this table, as it has an index,
+                    // we've removed its mapping in its old table, now lets move
+                    // its data and then patch up the new tables mapping, as well as
+                    // any other dbmaps we might be concerned about
+                            
+                    let new_entity_index = data_table_dest.get_next_free_row();
+
+                    // Move the entity from one table to the other, column by column.
+                    // This data is type-erased so we use a special "move" function pointer
+                    // we created with each column that knows what to do
+                    let mut deferred_table_construction = false;
+                    for (component_type, table_entry_from) in from_columns_map_guard.iter() {
+                        if let Some(table_entry_dest) = dest_columns_map_guard.get(component_type) {
+                            let index = (table_entry_from.fn_move)(entity, new_entity_index, &table_entry_from.data, &table_entry_dest.data)?;
+                        } else {
+                            data_table_dest.create_instance(entity, Some(new_entity_index), Some(&dest_columns_map_guard))?;
+                            //deferred_table_construction  = true;
+                            dest_entity_map_guard.insert(*entity, new_entity_index);
+                            let table_entry_dest = dest_columns_map_guard.get(component_type).expect("expect just created column");
+                            let index = (table_entry_from.fn_move)(entity, new_entity_index, &table_entry_from.data, &table_entry_dest.data)?;
+                        }
+                    }
+                    
                     // patch db maps
                     // guard scope
                     {
@@ -1574,9 +1568,6 @@ pub mod reckoning {
                 let table: &Table = table_guard.get(&family)
                     .ok_or(DbError::TableDoesntExistForFamily(family))?;
 
-                println!("set component for");
-                println!("{}", &self);
-                
                 table.set_component(entity, component)?;
             }
             Ok(())
