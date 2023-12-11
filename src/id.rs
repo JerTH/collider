@@ -230,7 +230,6 @@ pub(crate) type CommutativeHashValue = u64;
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct CommutativeId(CommutativeHashValue);
 pub(crate) const COMMUTATIVE_ID_INIT: CommutativeId = CommutativeId(COMMUTATIVE_HASH_PRIME);
-pub(crate) const COMMUTATIVE_HASH_TYPE_ZERO: CommutativeHashValue = 0 as CommutativeHashValue;
 pub(crate) const COMMUTATIVE_HASH_PRIME: CommutativeHashValue = 0x29233AAB26330D; // 11579208931619597
 
 impl CommutativeId {

@@ -144,12 +144,16 @@ pub struct Read<C: Component> {
 pub struct Write<C: Component> {
     marker: PhantomData<C>,
 }
+
+#[const_trait]
 pub trait ReadWrite {}
-impl<C> ReadWrite for Read<C> where C: Component {}
-impl<C> ReadWrite for Write<C> where C: Component {}
+impl<C> const ReadWrite for Read<C> where C: Component {}
+impl<C> const ReadWrite for Write<C> where C: Component {}
+
+#[const_trait]
 pub trait MetaData {}
-impl<'db, C> MetaData for Read<C> where C: Component {}
-impl<'db, C> MetaData for Write<C> where C: Component {}
+impl<'db, C> const MetaData for Read<C> where C: Component {}
+impl<'db, C> const MetaData for Write<C> where C: Component {}
 
 pub struct RowIter<'db, RTuple> {
     pub(crate) db: &'db EntityDatabase,
@@ -205,11 +209,11 @@ where
     }
 }
 
+#[const_trait]
 pub trait Selection {
     fn as_rows<'db, T>(db: &'db EntityDatabase) -> Rows<'db, T> {
         #![allow(unreachable_code, unused_variables)]
-        todo!("actually get a family id set");
-
+        unimplemented!()
         //crate::database::Rows {
         //    db,
         //    fs,

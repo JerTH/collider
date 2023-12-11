@@ -106,17 +106,21 @@ impl<'b> Drop for BorrowRefMut<'b> {
 pub enum BorrowError {
     AlreadyBorrowed,
 }
-type ColumnType<C: Component> = Vec<C>;
-pub struct ColumnRef<'b, C> {
+
+type ColumnType<C> = Vec<C>;
+
+pub struct ColumnRef<'b, C: Component> {
     column: NonNull<ColumnType<C>>,
     borrow: BorrowRef<'b>,
 }
-impl<'b, C> ColumnRef<'b, C> {
+
+impl<'b, C: Component> ColumnRef<'b, C> {
     pub fn new(column: NonNull<ColumnType<C>>, borrow: BorrowRef<'b>) -> Self {
         Self { column, borrow }
     }
 }
-impl<C> Deref for ColumnRef<'_, C> {
+
+impl<C: Component> Deref for ColumnRef<'_, C> {
     type Target = ColumnType<C>;
     fn deref(&self) -> &Self::Target {
         // SAFETY
@@ -124,7 +128,8 @@ impl<C> Deref for ColumnRef<'_, C> {
         unsafe { self.column.as_ref() }
     }
 }
-impl<'b, C: 'b> IntoIterator for ColumnRef<'b, C> {
+
+impl<'b, C: Component> IntoIterator for ColumnRef<'b, C> {
     type Item = &'b C;
     type IntoIter = ColumnIter<'b, C>;
     fn into_iter(self) -> Self::IntoIter {

@@ -820,7 +820,6 @@ pub mod reckoning {
                     // Move the entity from one table to the other, column by column.
                     // This data is type-erased so we use a special "move" function pointer
                     // we created with each column that knows what to do
-                    let mut deferred_table_construction = false;
                     for (component_type, table_entry_from) in from_columns_map_guard.iter() {
                         if let Some(table_entry_dest) = dest_columns_map_guard.get(component_type) {
                             let index = (table_entry_from.fn_move)(entity, new_entity_index, &table_entry_from.data, &table_entry_dest.data)?;
@@ -1008,8 +1007,8 @@ pub mod reckoning {
                         todo!()
                     }
                 }
-
-                impl<'a, $($t,)+> crate::database::Selection for ($($t,)+)
+                
+                impl<'a, $($t,)+> const crate::database::Selection for ($($t,)+)
                 where
                     $(
                         $t: MetaData,
@@ -1060,7 +1059,7 @@ mod vehicle_example {
 
     use super::reckoning::*;
     use super::transform::*;
-    
+
     #[derive(Debug, Default)]
     pub struct Physics {
         pos: f64,
