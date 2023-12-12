@@ -18,19 +18,18 @@ pub mod reckoning {
     use std::sync::PoisonError;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicU32;
-    use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
     
     // collections
-    use std::collections::HashSet;
     use std::collections::BTreeSet;
     use std::collections::HashMap;
 
     // crate
     use crate::EntityId;
+    use crate::column::Column;
+    use crate::column::ColumnKey;
     use crate::id::*;
     use crate::table::*;
-    use crate::borrowed::*;
 
     // typedefs
     pub(crate) type CType = self::ComponentType;
@@ -39,6 +38,7 @@ pub mod reckoning {
     pub(crate) type ColumnWriteGuard<'a> = RwLockWriteGuard<'a, HashMap<CType, TableEntry>>;
     pub(crate) type AnyPtr = Box<dyn Any>;
 
+    use dashmap::DashMap;
     use transfer::TransferGraph;
 
     pub trait Component: Default + Debug + 'static {}
@@ -46,8 +46,6 @@ pub mod reckoning {
     /// Component implementation for the unit type
     /// Every entity automatically gets this component upon creation
     impl Component for () {}
-
-    
 
     pub trait DbMapping<'db> {
         type Guard;
@@ -418,7 +416,7 @@ pub mod reckoning {
                     write!(f, "attempted to index a column out of bounds")
                 },
                 DbError::TableDoesntExistForFamily(family) => {
-                    write!(f, "table doesn't exist for the given family id")
+                    write!(f, "table doesn't exist for the given family id {}", family)
                 },
                 DbError::ColumnDoesntExistInTable => {
                     write!(f, "column doesn't exist in the given table")
@@ -442,24 +440,24 @@ pub mod reckoning {
     pub struct EntityDatabase {
         allocator: EntityAllocator,
 
-        // The actual database tables are stored here. One table per family
-        // Each table is comprised of a set of type erased columns
-        // All access should be via the read side of the RwLock EXCEPT for
-        // creating new tables. Synchronization is carefully handled on a much
-        // more granular level for entity interactions.
-        tables: Arc<RwLock<HashMap<FamilyId, Table>>>,
-
-        // Data mappings and caches. Stores some critical information for
-        // quickly querying the DB
-        maps: DbMaps, // cache?
+        /// Table structures describe who owns each column
+        tables: Arc<DashMap<FamilyId, Table>>,
+        
+        /// The actual raw user data is stored in columns
+        columns: Arc<DashMap<ColumnKey, Column>>, 
+        
+        /// Data mappings and caches. Stores some critical information for
+        /// quickly querying the DB
+        maps: DbMaps, // separate cache?
     }
-
+    
     impl EntityDatabase {
         /// Creates a new [EntityDatabase]
         pub fn new() -> Self {
             let db = Self {
                 allocator: EntityAllocator::new(),
-                tables: Arc::new(RwLock::new(HashMap::new())),
+                tables: Arc::new(DashMap::new()),
+                columns: Arc::new(DashMap::new()),
                 maps: DbMaps::new(),
             };
 
@@ -471,43 +469,58 @@ pub mod reckoning {
             let family_id = db.new_family(unit_family_set).expect("please report this bug - unable to create unit component family");
             db
         }
+        
+        pub fn update_mapping<'db, K: Eq + Hash, V: Clone>(&'db self, key: &'db K, value: &'db V) -> Result<(), DbError>
+        where
+            //(K, V): GetDbMap<'db, (K, V)>,
+            DbMaps: GetDbMap<'db, (K, V)>,
+        {
+            let mut guard = self.maps
+                .mut_map::<(K, V)>()
+                .ok_or(DbError::FailedToAcquireMapping)?;
 
+            guard.insert(*key, *value);
+            Ok(())
+        }
+
+        pub fn query_mapping<'db, K: Eq + Hash, V: Clone>(&'db self, key: &'db K) -> Option<&'db V>
+        where
+            DbMaps: GetDbMap<'db, (K, V)>,
+        {
+            self.maps.get::<(K, V)>(key).as_ref()
+        }
+        
         /// Creates an entity, returning its [EntityId]
         pub fn create(&self) -> Result<EntityId, CreateEntityError> {
-            let entity = self.allocator.alloc().map_err(|_| {
-                CreateEntityError::IdAllocatorError
-            })?;
+            let entity = self.allocator
+                .alloc()
+                .map_err(|_| {CreateEntityError::IdAllocatorError})?;
 
             let unit_family_set = ComponentTypeSet::from_iter([ComponentType::of::<()>()]);
-            let unit_family_id = self.maps.get::<(ComponentTypeSet, FamilyId)>(&unit_family_set)
+            let family: &FamilyId = self
+                .query_mapping(&unit_family_set)
                 .ok_or(CreateEntityError::DbError(DbError::FailedToFindFamilyForSet(unit_family_set)))?;
             
             // add the entity to the unit/null family
-            {
-                let mut guard = self.maps
-                    .mut_map::<(EntityId, FamilyId)>()
-                    .ok_or(DbError::FailedToAcquireMapping)
-                    .map_err(|err| CreateEntityError::DbError(err))?;
-        
-                guard.insert(entity, unit_family_id);
+            self.update_mapping(&entity, &family);
+            self.create_entity(&entity, &family)?;
+            Ok(entity)
+        }
 
-                match self.tables.read() {
-                    Ok(guard) => {
-                        let table = guard
-                            .get(&unit_family_id)
-                            .ok_or(DbError::FamilyDoesntExist(unit_family_id))?;
-                        
-                        table.create_instance(&entity, None, None)?;
-                    },
-                    Err(e) => {
-                        panic!("failed to create entity, poisoned rwlock {}", e);
-                    }
+        fn create_entity(&self, entity: &EntityId, family: &FamilyId) -> Result<(), DbError> {
+            let mut table = self.tables.get(family)
+                .ok_or(DbError::TableDoesntExistForFamily(*family))?;
+
+            let index = table.insert_new_entity(entity)?;
+            
+            for (ty, key) in table.column_map() {
+                if let Some(column) = self.columns.get(key) {
+                    
                 }
             }
-
             
 
-            Ok(entity)
+            Ok(())
         }
         
         /// Adds a [Component] to an entity
@@ -637,12 +650,9 @@ pub mod reckoning {
 
             let family_id = FamilyId::from_iter(components.iter());
             {
-                let mut guard = self.tables.write()
-                    .map_err(|e| DbError::UnableToAcquireTablesLock(e.to_string()))?;
-                
-                if let Some(base_table) = guard.get(&family_id) {
+                if let Some(base_table) = self.tables.get_mut(&family_id) {
                     println!("USING BASE TABLE");
-
+                    
                     let cloned_table = base_table.clone_new(family_id);
                     
                     {
@@ -655,9 +665,9 @@ pub mod reckoning {
                         }
                     }
 
-                    guard.insert(family_id, cloned_table);
+                    self.tables.insert(family_id, cloned_table);
                 } else {
-                    guard.insert(family_id, Table::new(family_id));
+                    self.tables.insert(family_id, Table::new(family_id));
                 }
             }
             
@@ -760,23 +770,20 @@ pub mod reckoning {
                 // try-back-off synchronization
                 // guard scope
                 loop {
-                    let table_guard;
                     let mut from_entity_map_guard;
                     let mut dest_entity_map_guard;
-                    let data_table_from;
-                    let data_table_dest;
                     let from_columns_map_guard;
                     let dest_columns_map_guard;
-                    
-                    if let Ok(tab_guard) = self.tables.try_read() {
-                        table_guard = tab_guard;
-                    } else {
-                        continue; // locking has failed, loop again
-                    }
+                    let data_table_dest;
+                    let data_table_from;
 
-                    data_table_from = table_guard
+                    data_table_from = self.tables
                         .get(&curr_family)
                         .ok_or(DbError::TableDoesntExistForFamily(curr_family))?;
+
+                    data_table_dest = self.tables
+                        .get(&dest_family)
+                        .ok_or(DbError::TableDoesntExistForFamily(dest_family))?;
 
                     if let Ok(col_from_guard) = data_table_from.columns().try_read() {
                         from_columns_map_guard = col_from_guard;
@@ -784,10 +791,6 @@ pub mod reckoning {
                         continue;
                     }
                     
-                    data_table_dest = table_guard
-                        .get(&dest_family)
-                        .ok_or(DbError::TableDoesntExistForFamily(dest_family))?;
-
                     if let Ok(col_dest_guard) = data_table_dest.columns().try_read() {
                         dest_columns_map_guard = col_dest_guard;
                     } else {
@@ -805,7 +808,6 @@ pub mod reckoning {
                     } else {
                         continue;
                     }
-
 
                     // If we've successfully locked everything we need this loop, we can proceeed
                     from_entity_map_guard.remove(entity);
@@ -840,6 +842,9 @@ pub mod reckoning {
                             .ok_or(DbError::FailedToAcquireMapping)?;
                         guard.insert(*entity, dest_family);
                     }
+                    drop(from_columns_map_guard);
+                    drop(dest_columns_map_guard);
+
                     return Ok(())
                 }
             }
@@ -858,11 +863,10 @@ pub mod reckoning {
                 .ok_or(DbError::EntityBelongsToUnknownFamily)?;
 
             {
-                let table_guard = self.tables.read().expect("unable to read data tables");
-                let table: &Table = table_guard.get(&family)
-                    .ok_or(DbError::TableDoesntExistForFamily(family))?;
-
-                table.set_component(entity, component)?;
+                self.tables
+                    .get_mut(&family)
+                    .ok_or(DbError::TableDoesntExistForFamily(family))?
+                    .set_component(entity, component)?;
             }
             Ok(())
         }
@@ -872,10 +876,8 @@ pub mod reckoning {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             write!(f, "db dump\n")?;
             {
-                if let Ok(guard) = self.tables.read() {
-                    for item in guard.iter() {
-                        write!(f, "{}",item.1)?;
-                    }
+                for item in self.tables.iter() {
+                    write!(f, "{}", *item);
                 }
             }
             write!(f, "\n")

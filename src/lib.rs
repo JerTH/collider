@@ -14,6 +14,7 @@
 pub(crate) mod macros;
 pub mod id;
 pub mod borrowed;
+pub mod column;
 pub mod table;
 pub mod transform;
 pub mod conflict;
