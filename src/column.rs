@@ -3,7 +3,7 @@ use std::{
     fmt::Display,
     marker::PhantomData,
     ops::{Deref, DerefMut},
-    ptr::NonNull,
+    ptr::NonNull, any::Any,
 };
 
 use crate::{
@@ -150,11 +150,12 @@ impl From<(FamilyId, ComponentType)> for ColumnKey {
 /// meta data associated with the column
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq)]
 pub struct ColumnHeader {
-    tyid: StableTypeId,
+    pub tyid: StableTypeId,
     pub fn_constructor: fn() -> AnyPtr,
     pub fn_instance: fn(&AnyPtr, usize),
     pub fn_move: fn(&EntityId, &AnyPtr, &AnyPtr, usize, usize) -> Result<(), DbError>,
     pub fn_resize: fn(&AnyPtr, usize) -> Result<usize, DbError>,
+    pub(crate) fn_debug: fn(&AnyPtr, &mut std::fmt::Formatter<'_>) -> std::fmt::Result,
 }
 
 impl ColumnHeader {
@@ -180,9 +181,16 @@ impl<'b> Column {
     }
 
     pub fn instantiate_with<C: Component>(&'b self, index: usize, component: C) -> Result<(), DbError> {
-        todo!()
-    }
+        self.instantiate_at(index)?;
 
+        let column = self.data
+            .downcast_ref::<ColumnInner<C>>()
+            .expect("expected matching column types");
+        let mut column_ref = column.borrow_column_mut();
+        column_ref[index] = component;
+        Ok(())
+    }
+    
     pub fn iter<T: Component>(&'b self) -> ColumnIter<'b, T> {
         debug_assert!(StableTypeId::of::<T>() == self.header.tyid);
         let column = self
@@ -211,9 +219,18 @@ impl<'b> Column {
     }
 }
 
+impl Display for Column {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Column\n[\n")?;
+        write!(f, "{:#?}", self.header)?;
+        (self.header.fn_debug)(&self.data, f)?;
+        write!(f, "]\n")
+    }
+}
+
 /// The actual raw data storage for the users data
 #[derive(Debug, Default)]
-struct ColumnInner<C: Component> {
+pub(crate) struct ColumnInner<C: Component> {
     /// INVARIANT:
     ///
     /// For an entity in a table, its associated components must
@@ -231,9 +248,9 @@ impl<C: Component> ColumnInner<C> {
 
 impl<C: Component> Display for ColumnInner<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Column\n")?;
-        write!(f, "\t{:?}\n", self.borrow)?;
-        write!(f, "\t{:?}\n", unsafe { &*self.values.get() })
+        write!(f, "\nColumnData ({:?})\n{{\n", self.borrow)?;
+        write!(f, "\t{:?}\n", unsafe { &*self.values.get() })?;
+        write!(f, "}}\n")
     }
 }
 
@@ -266,7 +283,16 @@ impl<'b, C: Component> ColumnInner<C> {
             None => Err(BorrowError::AlreadyBorrowed),
         }
     }
-    
+
+    fn downcast_column(column: &AnyPtr) -> &ColumnInner<C> {
+        column.downcast_ref::<ColumnInner<C>>().expect("column type mismatch when attempting to downcast")
+    } 
+
+    pub fn dynamic_debug(column: &AnyPtr, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result{
+        let column: &ColumnInner<C> = ColumnInner::downcast_column(column);
+        (column as &dyn Display).fmt(f)
+    }
+
     /// Moves a single component from one [Column] to another, if they are the same type
     pub fn dynamic_move(
         entity: &EntityId,
@@ -275,6 +301,15 @@ impl<'b, C: Component> ColumnInner<C> {
         from_index: usize,
         dest_index: usize,
     ) -> Result<(), DbError> {
+
+        { // guard scope
+            let raw_ptr_from: *const dyn Any = from_ptr.as_ref();
+            let raw_ptr_dest: *const dyn Any = dest_ptr.as_ref();
+            if raw_ptr_from == raw_ptr_dest {
+                return Ok(()) // no move necessary - same objects
+            }
+        }
+
         let mut from = from_ptr
             .downcast_ref::<ColumnInner<C>>()
             .ok_or(DbError::ColumnTypeDiscrepancy)?
@@ -299,10 +334,8 @@ impl<'b, C: Component> ColumnInner<C> {
 
     /// Resizes the column to hold at least [min_size] components
     pub fn dynamic_resize(column: &AnyPtr, min_size: usize) -> Result<usize, DbError> {
-        let real_column = column
-            .downcast_ref::<ColumnInner<C>>()
-            .expect("column type mismatch in dynamic method call");
-        real_column.resize_minimum(min_size)
+        let column: &ColumnInner<C> = ColumnInner::downcast_column(column);
+        column.resize_minimum(min_size)
     }
 
     /// Constructs a [Column] and returns a type erased pointer to it
@@ -312,12 +345,7 @@ impl<'b, C: Component> ColumnInner<C> {
 
     /// Creates a new instance of the component type C at the specified index in the column
     pub fn dynamic_instance(column: &AnyPtr, index: usize) {
-        // TODO: Just trying to get this working - need some guard rails around here
-        let real_column = column
-            .downcast_ref::<ColumnInner<C>>()
-            .expect("column type mismatch in dynamic method call");
-        let mut column = real_column.borrow_column_mut();
-        column[index] = Default::default();
+        unimplemented!()
     }
 
     pub fn resize_minimum(&self, min_size: usize) -> Result<usize, DbError> {

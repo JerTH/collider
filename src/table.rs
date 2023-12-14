@@ -4,7 +4,7 @@ use std::{
     sync::{
         atomic::{AtomicUsize, Ordering},
         Mutex, RwLock,
-    },
+    }, ops::{Deref, DerefMut},
 };
 
 use dashmap::DashMap;
@@ -97,6 +97,24 @@ impl Table {
 
     pub fn components(&self) -> &ComponentTypeSet {
         &self.components
+    }
+
+    pub fn remove_entity(&mut self, entity: &EntityId) -> Result<EntityId, DbError> {
+        let index = *self.entity_map
+            .get(entity)
+            .ok_or(DbError::EntityNotInTable(*entity, self.family))?;
+
+        let guard = self.free
+            .write()
+            .expect("unable to lock table free list for writes")
+            .push(index);
+        drop(guard);
+
+        self.entity_map
+            .remove(entity)
+            .expect("expected entity map to contain this value because of previous access");
+        
+        Ok(*entity)
     }
     
     /// Gets the index of the next free row in the table

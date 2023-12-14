@@ -26,18 +26,16 @@ pub mod reckoning {
 
     // crate
     use crate::EntityId;
-    use crate::column;
     use crate::column::Column;
     use crate::column::ColumnHeader;
+    use crate::column::ColumnInner;
     use crate::column::ColumnKey;
     use crate::id::*;
     use crate::table::*;
 
     // typedefs
-    pub(crate) type CType = self::ComponentType;
-    pub(crate) type CTypeSet = self::ComponentTypeSet;
-    pub(crate) type ColumnReadGuard<'a> = RwLockReadGuard<'a, HashMap<CType, TableEntry>>;
-    pub(crate) type ColumnWriteGuard<'a> = RwLockWriteGuard<'a, HashMap<CType, TableEntry>>;
+    pub(crate) type ColumnReadGuard<'a> = RwLockReadGuard<'a, HashMap<ComponentType, TableEntry>>;
+    pub(crate) type ColumnWriteGuard<'a> = RwLockWriteGuard<'a, HashMap<ComponentType, TableEntry>>;
     pub(crate) type AnyPtr = Box<dyn Any>;
 
     use dashmap::DashMap;
@@ -92,38 +90,38 @@ pub mod reckoning {
         }
     }
 
-    impl<'db> GetDbMap<'db, (CType, FamilyIdSet)> for DbMaps {
-        fn get(&self, from: &<(CType, FamilyIdSet) as DbMapping>::From) -> Option<<(CType, FamilyIdSet) as DbMapping>::To> {
+    impl<'db> GetDbMap<'db, (ComponentType, FamilyIdSet)> for DbMaps {
+        fn get(&self, from: &<(ComponentType, FamilyIdSet) as DbMapping>::From) -> Option<<(ComponentType, FamilyIdSet) as DbMapping>::To> {
             self.families_containing_component.read().ok().and_then(|g| g.get(from).cloned())
         }
 
-        fn mut_map(&'db self) -> Option<<(CType, FamilyIdSet) as DbMapping>::Guard> {
+        fn mut_map(&'db self) -> Option<<(ComponentType, FamilyIdSet) as DbMapping>::Guard> {
             self.families_containing_component.write().ok()
         }
     }
 
-    impl<'db> GetDbMap<'db, (CTypeSet, FamilyIdSet)> for DbMaps {
-        fn get(&self, from: &<(CTypeSet, FamilyIdSet) as DbMapping>::From) -> Option<<(CTypeSet, FamilyIdSet) as DbMapping>::To> {
+    impl<'db> GetDbMap<'db, (ComponentTypeSet, FamilyIdSet)> for DbMaps {
+        fn get(&self, from: &<(ComponentTypeSet, FamilyIdSet) as DbMapping>::From) -> Option<<(ComponentTypeSet, FamilyIdSet) as DbMapping>::To> {
             self.families_containing_set.read().ok().and_then(|g| g.get(from).cloned())
         }
 
-        fn mut_map(&'db self) -> Option<<(CTypeSet, FamilyIdSet) as DbMapping>::Guard> {
+        fn mut_map(&'db self) -> Option<<(ComponentTypeSet, FamilyIdSet) as DbMapping>::Guard> {
             self.families_containing_set.write().ok()
         }
     }
 
-    impl<'db> GetDbMap<'db, (FamilyId, CTypeSet)> for DbMaps {
-        fn get(&self, from: &<(FamilyId, CTypeSet) as DbMapping>::From) -> Option<<(FamilyId, CTypeSet) as DbMapping>::To> {
+    impl<'db> GetDbMap<'db, (FamilyId, ComponentTypeSet)> for DbMaps {
+        fn get(&self, from: &<(FamilyId, ComponentTypeSet) as DbMapping>::From) -> Option<<(FamilyId, ComponentTypeSet) as DbMapping>::To> {
             self.components_of_family.read().ok().and_then(|g| g.get(from).cloned())
         }
 
-        fn mut_map(&'db self) -> Option<<(FamilyId, CTypeSet) as DbMapping>::Guard> {
+        fn mut_map(&'db self) -> Option<<(FamilyId, ComponentTypeSet) as DbMapping>::Guard> {
             self.components_of_family.write().ok()
         }
     }
 
     impl<'db> GetDbMap<'db, (FamilyId, TransferGraph)> for DbMaps {
-        fn get(&self, from: &<(FamilyId, CTypeSet) as DbMapping>::From) -> Option<<(FamilyId, TransferGraph) as DbMapping>::To> {
+        fn get(&self, from: &<(FamilyId, ComponentTypeSet) as DbMapping>::From) -> Option<<(FamilyId, TransferGraph) as DbMapping>::To> {
             self.transfer_graph_of_family.read().ok().and_then(|g| g.get(from).cloned())
         }
 
@@ -143,11 +141,11 @@ pub mod reckoning {
     /// families at their creation, and then use that information to
     /// accelerate interactions with the [EntityDatabase]
     pub struct DbMaps {
-        component_group_to_family:      RwLock<HashMap<CTypeSet, FamilyId>>,
+        component_group_to_family:      RwLock<HashMap<ComponentTypeSet, FamilyId>>,
         entity_to_owning_family:        RwLock<HashMap<EntityId, FamilyId>>,
-        families_containing_component:  RwLock<HashMap<CType,    FamilyIdSet>>,
-        families_containing_set:        RwLock<HashMap<CTypeSet, FamilyIdSet>>,
-        components_of_family:           RwLock<HashMap<FamilyId, CTypeSet>>,
+        families_containing_component:  RwLock<HashMap<ComponentType,    FamilyIdSet>>,
+        families_containing_set:        RwLock<HashMap<ComponentTypeSet, FamilyIdSet>>,
+        components_of_family:           RwLock<HashMap<FamilyId, ComponentTypeSet>>,
         transfer_graph_of_family:       RwLock<HashMap<FamilyId, TransferGraph>>,
 
         // TODO: The traits that back DbMaps are designed to make
@@ -221,7 +219,7 @@ pub mod reckoning {
 
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct ComponentTypeSet {
-        ptr: Arc<BTreeSet<CType>>, // thread-local?
+        ptr: Arc<BTreeSet<ComponentType>>, // thread-local?
         id: u64,
     }
 
@@ -230,7 +228,7 @@ pub mod reckoning {
             self.ptr.contains(component)
         }
 
-        fn iter(&self) -> impl Iterator<Item = &CType> {
+        fn iter(&self) -> impl Iterator<Item = &ComponentType> {
             self.ptr.iter()
         }
 
@@ -277,12 +275,12 @@ pub mod reckoning {
     }
 
     pub struct Family {
-        components_set: CTypeSet,
+        components_set: ComponentTypeSet,
         transfer_graph: transfer::TransferGraph,
     }
 
     impl Family {
-        fn get_transfer(&self, _component: &CType) -> Option<transfer::Edge> { todo!() }
+        fn get_transfer(&self, _component: &ComponentType) -> Option<transfer::Edge> { todo!() }
     }
 
     #[derive(Debug)]
@@ -521,11 +519,11 @@ pub mod reckoning {
             
             // add the entity to the unit/null family
             self.update_mapping(&entity, &family);
-            self.initialize_row(&entity, &family)?;
+            self.initialize_row_in(&entity, &family)?;
             Ok(entity)
         }
 
-        fn initialize_row(&self, entity: &EntityId, family: &FamilyId) -> Result<usize, DbError> {
+        fn initialize_row_in(&self, entity: &EntityId, family: &FamilyId) -> Result<usize, DbError> {
             let mut table = self.tables.get_mut(family)
                 .ok_or(DbError::TableDoesntExistForFamily(*family))?;
 
@@ -711,9 +709,9 @@ pub mod reckoning {
 
             self.tables.insert(family_id, table);
 
-            self.update_mapping(&components, &family_id);
-            self.update_mapping(&family_id, &components);
-            self.update_mapping(&family_id, &TransferGraph::new());
+            self.update_mapping(&components, &family_id)?;
+            self.update_mapping(&family_id, &components)?;
+            self.update_mapping(&family_id, &TransferGraph::new())?;
             
             let mut guard = self.maps
                 .mut_map::<(ComponentType, FamilyIdSet)>()
@@ -757,10 +755,13 @@ pub mod reckoning {
             Ok(())
         }
 
-        fn remove_entity(&self, entity: &EntityId) -> Result<EntityId, DbError> {
-            todo!()
-        }
+        fn remove_entity_from(&self, entity: &EntityId, family: &FamilyId) -> Result<EntityId, DbError> {
+            let mut table = self.tables.get_mut(family)
+                .ok_or(DbError::TableDoesntExistForFamily(*family))?;
 
+            table.remove_entity(entity)
+        }
+        
         fn move_components(&self, entity: &EntityId, from_family: &FamilyId, dest_family: &FamilyId) -> Result<(), DbError> {
             let from_table = self.tables.get(from_family)
                 .ok_or(DbError::TableDoesntExistForFamily(*from_family))?;
@@ -773,7 +774,7 @@ pub mod reckoning {
 
             let dest_index = *dest_table.entity_map().get(entity)
                 .ok_or(DbError::EntityNotInTable(*entity, *dest_family))?;
-
+            
             let mut result = Ok(());
             from_table.column_map().iter().for_each(|(ty, from_key)| {
                 let from_col = self.columns.get(from_key);
@@ -791,13 +792,14 @@ pub mod reckoning {
                         todo!()
                     },
                     (Some(from), Some(dest)) => {
+                        println!("move components loop");
                         result = (from.header.fn_move)(entity, &from.data, &dest.data, from_index, dest_index);
                     },
                 }
             });
             result
         }
-        
+
         /// Transfers an entity out of its current family into the provided family, copying all component data
         /// 
         /// This typically happens when a component is added or removed from the entity
@@ -813,12 +815,10 @@ pub mod reckoning {
 
             debug_assert!(from_family != *dest_family);
             
-            self.initialize_row(entity, dest_family)?;
+            self.initialize_row_in(entity, dest_family)?;
             self.move_components(entity, &from_family, dest_family)?;
             self.update_mapping(entity, dest_family)?;
-            let removed = self.remove_entity(entity)?;
-
-            Ok(removed)
+            self.remove_entity_from(entity, &from_family)
         }
 
         /// Explicitly sets a component for an entity. This is often the first time
@@ -830,7 +830,62 @@ pub mod reckoning {
             entity: &EntityId,
             component: C
         ) -> Result<(), DbError> {
-            todo!()
+            let family: FamilyId = self
+                .query_mapping(entity)
+                .ok_or(DbError::EntityDoesntExist(*entity))?;
+
+            let table = self.tables
+                .get(&family)
+                .ok_or(DbError::TableDoesntExistForFamily(family))?;
+
+            let index = *table.entity_map()
+                .get(entity)
+                .ok_or(DbError::EntityNotInTable(*entity, family))?;
+
+            let opt_has_column_key = table.column_map()
+                .get(&ComponentType::of::<C>())
+                .cloned();
+
+            drop(table); // drop here to release read lock. we might re-acquire a write lock below
+            
+            match opt_has_column_key {
+                Some(column_key) => {
+                    self.columns
+                        .get(&column_key)
+                        .ok_or(DbError::ColumnDoesntExistInTable)?
+                        .instantiate_with(index, component)?;
+                },
+                None => {
+                    let mut table = self.tables
+                        .get_mut(&family)
+                        .ok_or(DbError::TableDoesntExistForFamily(family))?;
+
+                    let component_type = ComponentType::of::<C>();
+                    let new_column_key = ColumnKey::from((family, component_type));
+
+                    let header = ColumnHeader {
+                        tyid: component_type.inner(),
+                        fn_constructor: ColumnInner::<C>::dynamic_ctor,
+                        fn_instance: ColumnInner::<C>::dynamic_instance,
+                        fn_move: ColumnInner::<C>::dynamic_move,
+                        fn_resize: ColumnInner::<C>::dynamic_resize,
+                        fn_debug: ColumnInner::<C>::dynamic_debug
+                    };
+                    
+                    let column_inner = (header.fn_constructor)();
+                    let column = Column::new(header.clone(), column_inner);
+                    
+                    column.instantiate_with(index, component)?;
+
+                    self.columns.insert(new_column_key, column);
+                    table.update_column_map(component_type, new_column_key);
+
+                },
+            }
+
+            
+
+            Ok(())
         }
     }
 
@@ -840,6 +895,10 @@ pub mod reckoning {
             {
                 for item in self.tables.iter() {
                     write!(f, "{}", *item);
+                }
+
+                for item in self.columns.iter() {
+                    write!(f, "{}", *item)?;
                 }
             }
             write!(f, "\n")
@@ -861,13 +920,12 @@ pub mod reckoning {
         use std::collections::HashMap;
         use std::sync::Arc;
         use std::sync::RwLock;
-        use crate::database::reckoning::CType;
+        use crate::database::reckoning::ComponentType;
         use super::FamilyId;
-        use super::ComponentType;
         
         #[derive(Clone)]
         pub struct TransferGraph {
-            links: Arc<RwLock<HashMap<CType, Edge>>>,
+            links: Arc<RwLock<HashMap<ComponentType, Edge>>>,
         }
 
         impl TransferGraph {
