@@ -9,10 +9,10 @@ use std::{
 use crate::{
     borrowed::{BorrowError, BorrowRef, BorrowRefMut, BorrowSentinel},
     database::{
-        reckoning::{AnyPtr, DbError},
-        Component,
+        reckoning::{AnyPtr, DbError, Family},
+        Component, ComponentType,
     },
-    id::StableTypeId,
+    id::{StableTypeId, CommutativeId, FamilyId},
     EntityId,
 };
 
@@ -134,14 +134,15 @@ impl<'b, T: 'b> Iterator for ColumnIterMut<'b, T> {
 
 pub const COLUMN_LENGTH_MAXIMUM: usize = 2 ^ 14;
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ColumnKey(u64);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ColumnKey(CommutativeId);
 
-/// A type erased container for storing a contiguous column of data
-#[derive(Debug)]
-pub struct Column {
-    pub header: ColumnHeader, // Meta-data and function ptrs
-    pub data: AnyPtr,       // ColumnInner<T>
+/// Combines a family ID and a type id into a column key
+/// Each family can have exactly one column of a given type
+impl From<(FamilyId, ComponentType)> for ColumnKey {
+    fn from(value: (FamilyId, ComponentType)) -> Self {
+        ColumnKey(CommutativeId::from((value.0, value.1)))
+    }
 }
 
 /// A header describing a certain typed column. Stores the necessary functions
@@ -152,11 +153,36 @@ pub struct ColumnHeader {
     tyid: StableTypeId,
     pub fn_constructor: fn() -> AnyPtr,
     pub fn_instance: fn(&AnyPtr, usize),
-    pub fn_move: fn(&EntityId, usize, &AnyPtr, &AnyPtr) -> Result<usize, DbError>,
-    pub fn_resize: fn(&AnyPtr, usize) -> usize,
+    pub fn_move: fn(&EntityId, &AnyPtr, &AnyPtr, usize, usize) -> Result<(), DbError>,
+    pub fn_resize: fn(&AnyPtr, usize) -> Result<usize, DbError>,
+}
+
+impl ColumnHeader {
+    pub const fn stable_type_id(&self) -> StableTypeId {
+        self.tyid
+    }
+}
+
+/// A type erased container for storing a contiguous column of data
+#[derive(Debug)]
+pub struct Column {
+    pub header: ColumnHeader, // Meta-data and function ptrs
+    pub data: AnyPtr,       // ColumnInner<T>
 }
 
 impl<'b> Column {
+    /// Instantiate a component instance at the specified index
+    /// This function doesn't actually really care about the data
+    /// stored at a given index, it just cares that the memory at
+    /// the provided index is initialized
+    pub fn instantiate_at(&'b self, index: usize) -> Result<(), DbError> {
+        (self.header.fn_resize)(&self.data, index).map(|_| ())
+    }
+
+    pub fn instantiate_with<C: Component>(&'b self, index: usize, component: C) -> Result<(), DbError> {
+        todo!()
+    }
+
     pub fn iter<T: Component>(&'b self) -> ColumnIter<'b, T> {
         debug_assert!(StableTypeId::of::<T>() == self.header.tyid);
         let column = self
@@ -178,6 +204,10 @@ impl<'b> Column {
         let column_iter_mut = column_mut.into_iter();
 
         column_iter_mut
+    }
+
+    pub fn new(header: ColumnHeader, data: AnyPtr) -> Column {
+        Column { header, data }
     }
 }
 
@@ -236,33 +266,39 @@ impl<'b, C: Component> ColumnInner<C> {
             None => Err(BorrowError::AlreadyBorrowed),
         }
     }
-
+    
     /// Moves a single component from one [Column] to another, if they are the same type
     pub fn dynamic_move(
         entity: &EntityId,
-        index: usize,
-        from: &AnyPtr,
-        dest: &AnyPtr,
-    ) -> Result<usize, DbError> {
-        let mut from = from
+        from_ptr: &AnyPtr,
+        dest_ptr: &AnyPtr,
+        from_index: usize,
+        dest_index: usize,
+    ) -> Result<(), DbError> {
+        let mut from = from_ptr
             .downcast_ref::<ColumnInner<C>>()
             .ok_or(DbError::ColumnTypeDiscrepancy)?
             .borrow_column_mut();
 
-        let mut dest = dest
+        let mut dest = dest_ptr
             .downcast_ref::<ColumnInner<C>>()
             .ok_or(DbError::ColumnTypeDiscrepancy)?
             .borrow_column_mut();
 
-        debug_assert!(from.len() < index);
+        debug_assert!(from.len() > from_index);
+        debug_assert!(dest.len() > dest_index);
 
-        let component = from.remove(index);
-        dest.push(component);
-        Ok(dest.len())
+        unsafe {
+            dest.insert(dest_index, from[from_index].clone());
+        }
+
+        from[from_index] = Default::default();
+
+        Ok(())
     }
 
     /// Resizes the column to hold at least [min_size] components
-    pub fn dynamic_resize(column: &AnyPtr, min_size: usize) -> usize {
+    pub fn dynamic_resize(column: &AnyPtr, min_size: usize) -> Result<usize, DbError> {
         let real_column = column
             .downcast_ref::<ColumnInner<C>>()
             .expect("column type mismatch in dynamic method call");
@@ -284,15 +320,19 @@ impl<'b, C: Component> ColumnInner<C> {
         column[index] = Default::default();
     }
 
-    pub fn resize_minimum(&self, min_size: usize) -> usize {
+    pub fn resize_minimum(&self, min_size: usize) -> Result<usize, DbError> {
         let power_of_two_index = std::cmp::max(min_size, 1).next_power_of_two();
         debug_assert!(power_of_two_index < COLUMN_LENGTH_MAXIMUM);
+
         let mut column = self.borrow_column_mut();
         let len = column.len();
+        
         if min_size >= len {
             column.resize_with(power_of_two_index, Default::default);
         }
-        let new_len = column.len();
-        new_len
+        
+        debug_assert!(column.len() >= min_size);
+
+        Ok(column.len())
     }
 }

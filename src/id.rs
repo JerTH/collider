@@ -2,9 +2,11 @@ use std::hash::Hash;
 use std::ops::Deref;
 use std::fmt::{Display, self};
 use std::sync::{RwLock, Arc};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap};
 use std::sync::LazyLock;
 use std::fmt::Debug;
+
+use dashmap::DashSet;
 
 use crate::database::ComponentType;
 
@@ -46,6 +48,7 @@ pub(crate) struct ComponentId(pub(crate) IdUnion);
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct FamilyId(CommutativeId);
+
 impl Display for FamilyId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0.0)
@@ -60,7 +63,7 @@ impl<'i> FromIterator<&'i ComponentType> for FamilyId {
 
 /// An immutable set of family id's
 
-pub(crate) type FamilyIdSetImpl = HashSet<FamilyId>; // INVARIANT: This type MUST NOT accept duplicates 
+pub(crate) type FamilyIdSetImpl = DashSet<FamilyId>; // INVARIANT: This type MUST NOT accept duplicates 
 pub(crate) type FamilyIdSetInner = (CommutativeId, FamilyIdSetImpl);
 
 #[derive(Clone)]
@@ -73,8 +76,8 @@ impl FamilyIdSet {
         self.ptr.1.contains(id)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &FamilyId> {
-        self.ptr.1.iter()
+    pub fn insert(&self, family_id: FamilyId) {
+        self.ptr.1.insert(family_id);
     }
 }
 
@@ -252,6 +255,14 @@ impl CommutativeId {
     #[inline(always)]
     fn non_zero(&self) -> bool {
         !(self.0 == 0)
+    }
+}
+
+impl From<(FamilyId, ComponentType)> for CommutativeId {
+    fn from(value: (FamilyId, ComponentType)) -> Self {
+        let family_id = value.0;
+        let stable_id = value.1.inner();
+        (family_id.0).and(&CommutativeId(stable_id.raw_id()))
     }
 }
 

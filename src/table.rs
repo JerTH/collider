@@ -65,7 +65,7 @@ pub struct Table {
 
     /// Free list of indicies, the free list is populated whenever
     /// an entity is destroyed or moved out of the table
-    free: Vec<usize>,
+    free: RwLock<Vec<usize>>,
 }
 
 impl Table {
@@ -75,27 +75,35 @@ impl Table {
             components,
             columns: HashMap::new(),
             entity_map: HashMap::new(),
-            free: Vec::new(),
+            free: RwLock::new(Vec::new()),
         }
     }
 
-    pub fn free_count(&self) -> usize {
-        return self.free.len()
+    pub fn family_id(&self) -> &FamilyId {
+        &self.family
     }
 
+    pub fn free_count(&self) -> usize {
+        self.free.read().expect("unable to read table free list").len()
+    }
+    
     pub fn entity_map(&self) -> &HashMap<EntityId, usize> {
-        return &self.entity_map;
+        &self.entity_map
     }
     
     pub fn column_map(&self) -> &HashMap<ComponentType, ColumnKey> {
         &self.columns
     }
 
+    pub fn components(&self) -> &ComponentTypeSet {
+        &self.components
+    }
+    
     /// Gets the index of the next free row in the table
     /// expanding the table if necessary
     pub fn get_next_free_row(&self) -> usize {
         // Do we already have a next free row?
-        if let Some(free) = self.free.pop() {
+        if let Some(free) = self.free.write().expect("unable to write table free list").pop() {
             return free
         } else {
             return self.entity_map.len()
@@ -104,8 +112,12 @@ impl Table {
 
     pub fn insert_new_entity(&mut self, entity: &EntityId) -> Result<usize, DbError> {
         let index = self.get_next_free_row();
-        self.entity_map().insert(*entity, index);
+        self.entity_map.insert(*entity, index);
         Ok(index)
+    }
+
+    pub fn update_column_map(&mut self, component_type: ComponentType, column_key: ColumnKey) {
+        self.columns.insert(component_type, column_key);
     }
 }
 
@@ -114,7 +126,7 @@ impl Display for Table {
         write!(f, "\nTable\n")?;
         write!(f, "family: {}\n", self.family)?;
         write!(f, "size: {}\n", self.entity_map.len());
-        write!(f, "num_free: {}\n", self.free.len());
+        write!(f, "num_free: {}\n", self.free.read().expect("unable to read table free list").len());
 
         {
             write!(f, "entity_map:\n")?;

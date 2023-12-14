@@ -26,7 +26,9 @@ pub mod reckoning {
 
     // crate
     use crate::EntityId;
+    use crate::column;
     use crate::column::Column;
+    use crate::column::ColumnHeader;
     use crate::column::ColumnKey;
     use crate::id::*;
     use crate::table::*;
@@ -41,7 +43,7 @@ pub mod reckoning {
     use dashmap::DashMap;
     use transfer::TransferGraph;
 
-    pub trait Component: Default + Debug + 'static {}
+    pub trait Component: Default + Debug + Clone + 'static {}
     
     /// Component implementation for the unit type
     /// Every entity automatically gets this component upon creation
@@ -173,7 +175,7 @@ pub mod reckoning {
         /// time possible. As such, it is encouraged to only map to small
         /// values, or, large values stored behind a reference counted
         /// pointer
-        pub fn get<M>(&self, from: &M::From) -> Option<M::To>
+        pub fn get_map<M>(&self, from: &M::From) -> Option<M::To>
         where
             M: DbMapping<'db>,
             Self: GetDbMap<'db, M>,
@@ -191,7 +193,7 @@ pub mod reckoning {
             <Self as GetDbMap<'db, M>>::mut_map(&self)
         }
     }
-    
+
     #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct ComponentType(StableTypeId);
 
@@ -202,6 +204,12 @@ pub mod reckoning {
 
         pub fn inner(&self) -> StableTypeId {
             return self.0
+        }
+    }
+
+    impl From<StableTypeId> for ComponentType {
+        fn from(value: StableTypeId) -> Self {
+            Self(value)
         }
     }
 
@@ -229,6 +237,10 @@ pub mod reckoning {
         fn names(&self) -> String {
             let out = self.ptr.iter().fold(String::new(), |out, c| out + &String::from(format!("{}, ", c)));
             format!("[{}]", out.trim_end_matches([' ', ',']))
+        }
+
+        fn len(&self) -> usize {
+            self.ptr.len()
         }
     }
 
@@ -436,7 +448,7 @@ pub mod reckoning {
             }
         }
     }
-    
+
     pub struct EntityDatabase {
         allocator: EntityAllocator,
 
@@ -448,7 +460,12 @@ pub mod reckoning {
         
         /// Data mappings and caches. Stores some critical information for
         /// quickly querying the DB
-        maps: DbMaps, // separate cache?
+        maps: DbMaps,
+
+        /// Cache of the column headers we've seen/created
+        /// These can be used to quickly instantiate tables with
+        /// types of columns we've already built
+        headers: Arc<DashMap<ComponentType, ColumnHeader>>,
     }
     
     impl EntityDatabase {
@@ -458,6 +475,7 @@ pub mod reckoning {
                 allocator: EntityAllocator::new(),
                 tables: Arc::new(DashMap::new()),
                 columns: Arc::new(DashMap::new()),
+                headers: Arc::new(DashMap::new()),
                 maps: DbMaps::new(),
             };
 
@@ -470,7 +488,7 @@ pub mod reckoning {
             db
         }
         
-        pub fn update_mapping<'db, K: Eq + Hash, V: Clone>(&'db self, key: &'db K, value: &'db V) -> Result<(), DbError>
+        pub fn update_mapping<'db, K: Clone + Eq + Hash + 'db, V: Clone + 'db>(&'db self, key: &'db K, value: &'db V) -> Result<(), DbError>
         where
             //(K, V): GetDbMap<'db, (K, V)>,
             DbMaps: GetDbMap<'db, (K, V)>,
@@ -479,15 +497,15 @@ pub mod reckoning {
                 .mut_map::<(K, V)>()
                 .ok_or(DbError::FailedToAcquireMapping)?;
 
-            guard.insert(*key, *value);
+            guard.insert(key.clone(), value.clone());
             Ok(())
         }
-
-        pub fn query_mapping<'db, K: Eq + Hash, V: Clone>(&'db self, key: &'db K) -> Option<&'db V>
+        
+        pub fn query_mapping<'db, K: Eq + Hash, V: Clone + 'db>(&'db self, key: &'db K) -> Option<V>
         where
             DbMaps: GetDbMap<'db, (K, V)>,
         {
-            self.maps.get::<(K, V)>(key).as_ref()
+            self.maps.get_map::<(K, V)>(key)
         }
         
         /// Creates an entity, returning its [EntityId]
@@ -497,45 +515,57 @@ pub mod reckoning {
                 .map_err(|_| {CreateEntityError::IdAllocatorError})?;
 
             let unit_family_set = ComponentTypeSet::from_iter([ComponentType::of::<()>()]);
-            let family: &FamilyId = self
+            let family: FamilyId = self
                 .query_mapping(&unit_family_set)
-                .ok_or(CreateEntityError::DbError(DbError::FailedToFindFamilyForSet(unit_family_set)))?;
+                .ok_or(CreateEntityError::DbError(DbError::FailedToFindFamilyForSet(unit_family_set.clone())))?;
             
             // add the entity to the unit/null family
             self.update_mapping(&entity, &family);
-            self.create_entity(&entity, &family)?;
+            self.initialize_row(&entity, &family)?;
             Ok(entity)
         }
 
-        fn create_entity(&self, entity: &EntityId, family: &FamilyId) -> Result<(), DbError> {
-            let mut table = self.tables.get(family)
+        fn initialize_row(&self, entity: &EntityId, family: &FamilyId) -> Result<usize, DbError> {
+            let mut table = self.tables.get_mut(family)
                 .ok_or(DbError::TableDoesntExistForFamily(*family))?;
 
             let index = table.insert_new_entity(entity)?;
             
             for (ty, key) in table.column_map() {
                 if let Some(column) = self.columns.get(key) {
-                    
+                    column.instantiate_at(index)?;
+                } else {
+                    if let Some(column_header) = self.headers.get(ty) {
+                        let component_type = ComponentType::from(column_header.stable_type_id());
+                        let column_key = ColumnKey::from((*table.family_id(), component_type));
+                        let column_inner = (column_header.fn_constructor)();
+                        let column = Column::new(column_header.clone(), column_inner); 
+                        self.columns.insert(column_key, column);
+                    } else {
+                        todo!("lazy init columns");
+                    }
                 }
             }
-            
 
-            Ok(())
+            Ok(index)
         }
         
-        /// Adds a [Component] to an entity
+        /// Adds a [Component] to an entity, moving it from one family to another
+        /// 
+        /// If the newly create combination of components has never been created before,
+        /// this will create a new family and its associated data columns
         pub fn add_component<C: Component>(
             &mut self,
             entity: EntityId,
             component: C
         ) -> Result<(), DbError>
         {
-            StableTypeId::register_debug_info::<C>(); // TODO: Fine to do this multiple times, but has perf impact, do once
+            StableTypeId::register_debug_info::<C>();
 
             let cty = ComponentType::of::<C>();
             let delta = ComponentDelta::Add(cty);
 
-            let cur_family = self.maps.get::<(EntityId, FamilyId)>(&entity);
+            let cur_family = self.maps.get_map::<(EntityId, FamilyId)>(&entity);
             let new_family = self.find_new_family(&entity, &delta)?;
             
             self.resolve_entity_transfer(&entity, &new_family)?;
@@ -548,21 +578,34 @@ pub mod reckoning {
         /// A global component only ever has one instance, and is accessible by
         /// any system with standard Read/Write rules. Typical uses for a global
         /// component might be deferred events, or cross-cutting state such as
-        /// input
+        /// input.
         pub fn add_global_component<T: Component>(&mut self) {
+            // Consideration:
+            //
+            // Mutating global components should be particularly strict, perhaps
+            // only in a specific phase at the beginning or end of the frame,
+            // or at the end of each phase.
+            //
+            // Reading global components should be possible from any system at
+            // any time
+            
             todo!()
         }
 
         /// Retrieves the next [Command] generated by the [EntityDatabase], or
         /// returns [None] if there are no pending commands. Commands are used
-        /// by the [EntityDatabase] to communicate with the main game loop
+        /// by the [EntityDatabase] to communicate with external control structures
         pub fn query_commands(&self) -> Option<Command> {
-            // IMPL DETAILS
+            // Notes:
+            //
             // Still don't have a clear picture of how this should work
             // One thought is to have an implicit CommandQueue global component
             // which can be queried regularly by systems (perhaps with a special
             // Global<CommandQueue> accessor), from which the system can enqueue
-            // higher order commands as if it were a regular component
+            // higher order commands as if it were a regular component. However
+            // this would introduce synchonization difficulties, unless commands
+            // were collected per-thread and then the full stream was stitched
+            // together at the end of each phase, or a wait-free queue was used
             
             todo!()
         }
@@ -575,7 +618,7 @@ pub mod reckoning {
             delta: &ComponentDelta
         ) -> Result<FamilyId, DbError> {
             let family = self.maps
-                .get::<(EntityId, FamilyId)>(entity)
+                .get_map::<(EntityId, FamilyId)>(entity)
                 .ok_or(DbError::EntityDoesntExist(*entity))?;
 
             match delta {
@@ -590,31 +633,31 @@ pub mod reckoning {
 
         fn family_after_add(
             &self,
-            current: &FamilyId,
-            component: &ComponentType
+            curr_family: &FamilyId,
+            new_component: &ComponentType
         ) -> Result<FamilyId, DbError> {
             
             // First try and find an already cached edge on the transfer graph for this family
-            if let Some(transfer::Edge::Add(family_id)) = self.query_transfer_graph(current, component) {
+            if let Some(transfer::Edge::Add(family_id)) = self.query_transfer_graph(curr_family, new_component) {
                 return Ok(family_id)
             } else {
                 // Else resolve the family manually, and update the transfer graph
-                let components = self.maps
-                    .get::<(FamilyId, ComponentTypeSet)>(current)
+                let components: ComponentTypeSet = self
+                    .query_mapping(curr_family)
                     .ok_or(DbError::EntityBelongsToUnknownFamily)?;
-
-                if components.contains(&component) {
-                    return Ok(*current)
+                
+                if components.contains(&new_component) {
+                    return Ok(*curr_family)
                 } else {
                     let new_components_iter =
                         components
-                        .iter()
-                        .cloned()
-                        .chain([*component]);
+                            .iter()
+                            .cloned()
+                            .chain([*new_component]);
 
                     let new_components = ComponentTypeSet::from_iter(new_components_iter);
 
-                    let family = match self.maps.get::<(ComponentTypeSet, FamilyId)>(&new_components) {
+                    let family = match self.maps.get_map::<(ComponentTypeSet, FamilyId)>(&new_components) {
                         Some(family) => {
                             family
                         },
@@ -623,8 +666,8 @@ pub mod reckoning {
                         }
                     };
                     
-                    self.update_transfer_graph(current, component, transfer::Edge::Add(family))?;
-                    self.update_transfer_graph(&family, component, transfer::Edge::Remove(*current))?;
+                    self.update_transfer_graph(curr_family, new_component, transfer::Edge::Add(family))?;
+                    self.update_transfer_graph(&family, new_component, transfer::Edge::Remove(*curr_family))?;
 
                     Ok(family)
                 }
@@ -645,76 +688,44 @@ pub mod reckoning {
         fn new_family(
             &self,
             components: ComponentTypeSet,
-        ) -> Result<FamilyId, DbError> {
-            println!("CREATING NEW FAMILY");
-
+        ) -> Result<FamilyId, DbError> {            
             let family_id = FamilyId::from_iter(components.iter());
-            {
-                if let Some(base_table) = self.tables.get_mut(&family_id) {
-                    println!("USING BASE TABLE");
-                    
-                    let cloned_table = base_table.clone_new(family_id);
-                    
-                    {
-                        let mut cloned_table_columns_guard = cloned_table.columns()
-                            .write()
-                            .expect("unable to lock cloned table columns for write");
-                        
-                        for (tyid, table_entry) in cloned_table_columns_guard.iter_mut() {
-                            table_entry.data = (table_entry.fn_constructor)()
-                        }
-                    }
+            let mut headers: Vec<ColumnHeader> = Vec::with_capacity(components.len());
 
-                    self.tables.insert(family_id, cloned_table);
-                } else {
-                    self.tables.insert(family_id, Table::new(family_id));
+            components.iter().for_each(|ty| {
+                if let Some(header) = self.headers.get(ty) {
+                    headers.push(header.clone());
                 }
-            }
+            });
+
+            let mut table = Table::new(family_id, components.clone());
+
+            headers.iter().for_each(|header| {
+                let component_type = ComponentType::from(header.stable_type_id());
+                let column_inner = (header.fn_constructor)();
+                let column = Column::new(header.clone(), column_inner);
+                let column_key = ColumnKey::from((family_id, component_type));
+                self.columns.insert(column_key, column);
+                table.update_column_map(component_type, column_key);
+            });
+
+            self.tables.insert(family_id, table);
+
+            self.update_mapping(&components, &family_id);
+            self.update_mapping(&family_id, &components);
+            self.update_mapping(&family_id, &TransferGraph::new());
             
-            // We map each family to the set of components it represents
-            {
-                let mut guard = self.maps
-                    .mut_map::<(FamilyId, CTypeSet)>()
-                    .ok_or(DbError::FailedToAcquireMapping)?;
-                guard.insert(family_id, components.clone());
-            }
-
-            // We reverse map each set of components to its family id
-            {
-                let mut guard = self.maps
-                    .mut_map::<(CTypeSet, FamilyId)>()
-                    .ok_or(DbError::FailedToAcquireMapping)?;
-                guard.insert(components.clone(), family_id);
-            }
-
-            // We map each family to an associated transfer graph
-            {
-                let mut guard = self.maps
-                    .mut_map::<(FamilyId, TransferGraph)>()
-                    .ok_or(DbError::FailedToAcquireMapping)?;
-                guard.insert(family_id, TransferGraph::new());
-            }
-
-            // We map each component type in the set to every family that contains it
-            {
-                let mut guard = self.maps
-                    .mut_map::<(CType, FamilyIdSet)>()
-                    .ok_or(DbError::FailedToAcquireMapping)?;
-
-                for cty in components.iter() {
-                    let set;
-
-                    match guard.remove(cty) {
-                        Some(old_family_set) => {
-                            set = FamilyIdSet::from(old_family_set.iter().chain([&family_id]));
-                        },
-                        None => {
-                            set = FamilyIdSet::from(&[family_id]);
-                        },
-                    }
-                    guard.insert(*cty, set);
-                }
-            }
+            let mut guard = self.maps
+                .mut_map::<(ComponentType, FamilyIdSet)>()
+                .ok_or(DbError::FailedToAcquireMapping)?;
+            
+            // We map each component type to the set of families which contain it
+            components.iter().for_each(|component_type| {
+                guard
+                    .entry(*component_type)
+                    .and_modify(|set| set.insert(family_id))
+                    .or_insert(FamilyIdSet::from(&[family_id]));
+            });
             
             Ok(family_id)
         }
@@ -727,7 +738,7 @@ pub mod reckoning {
             family: &FamilyId,
             component: &ComponentType
         ) -> Option<transfer::Edge> {
-            self.maps.get::<(FamilyId, TransferGraph)>(family)
+            self.maps.get_map::<(FamilyId, TransferGraph)>(family)
                 .and_then(|graph| graph.get(component))
         }
 
@@ -746,108 +757,68 @@ pub mod reckoning {
             Ok(())
         }
 
+        fn remove_entity(&self, entity: &EntityId) -> Result<EntityId, DbError> {
+            todo!()
+        }
+
+        fn move_components(&self, entity: &EntityId, from_family: &FamilyId, dest_family: &FamilyId) -> Result<(), DbError> {
+            let from_table = self.tables.get(from_family)
+                .ok_or(DbError::TableDoesntExistForFamily(*from_family))?;
+
+            let dest_table = self.tables.get(dest_family)
+                .ok_or(DbError::TableDoesntExistForFamily(*dest_family))?;
+
+            let from_index = *from_table.entity_map().get(entity)
+                .ok_or(DbError::EntityNotInTable(*entity, *from_family))?;
+
+            let dest_index = *dest_table.entity_map().get(entity)
+                .ok_or(DbError::EntityNotInTable(*entity, *dest_family))?;
+
+            let mut result = Ok(());
+            from_table.column_map().iter().for_each(|(ty, from_key)| {
+                let from_col = self.columns.get(from_key);
+                let dest_col = from_table.column_map().get(ty)
+                    .and_then(|key| self.columns.get(key));
+
+                match (from_col, dest_col) {
+                    (None, None) => {
+                        todo!()
+                    },
+                    (None, Some(dest)) => {
+                        todo!()
+                    },
+                    (Some(from), None) => {
+                        todo!()
+                    },
+                    (Some(from), Some(dest)) => {
+                        result = (from.header.fn_move)(entity, &from.data, &dest.data, from_index, dest_index);
+                    },
+                }
+            });
+            result
+        }
+        
         /// Transfers an entity out of its current family into the provided family, copying all component data
         /// 
         /// This typically happens when a component is added or removed from the entity
         fn resolve_entity_transfer(
             &self,
             entity: &EntityId,
-            family: &FamilyId
-        ) -> Result<(), DbError> {
+            dest_family: &FamilyId
+        ) -> Result<EntityId, DbError> {
 
-            let curr_family: FamilyId = self.maps.get::<(EntityId, FamilyId)>(entity)
+            let from_family: FamilyId = self
+                .query_mapping(entity)
                 .ok_or(DbError::EntityDoesntExist(*entity))?;
+
+            debug_assert!(from_family != *dest_family);
             
-            let dest_family: FamilyId = *family;
+            self.initialize_row(entity, dest_family)?;
+            self.move_components(entity, &from_family, dest_family)?;
+            self.update_mapping(entity, dest_family)?;
+            let removed = self.remove_entity(entity)?;
 
-            // no change needs to be resolved
-            if curr_family == dest_family {
-                return Ok(())
-            }
-            
-            // table guard scope
-            {
-                // try-back-off synchronization
-                // guard scope
-                loop {
-                    let mut from_entity_map_guard;
-                    let mut dest_entity_map_guard;
-                    let from_columns_map_guard;
-                    let dest_columns_map_guard;
-                    let data_table_dest;
-                    let data_table_from;
-
-                    data_table_from = self.tables
-                        .get(&curr_family)
-                        .ok_or(DbError::TableDoesntExistForFamily(curr_family))?;
-
-                    data_table_dest = self.tables
-                        .get(&dest_family)
-                        .ok_or(DbError::TableDoesntExistForFamily(dest_family))?;
-
-                    if let Ok(col_from_guard) = data_table_from.columns().try_read() {
-                        from_columns_map_guard = col_from_guard;
-                    } else {
-                        continue;
-                    }
-                    
-                    if let Ok(col_dest_guard) = data_table_dest.columns().try_read() {
-                        dest_columns_map_guard = col_dest_guard;
-                    } else {
-                        continue;
-                    }
-
-                    if let Ok(map_from_guard) = data_table_from.entity_map().try_write() {
-                        from_entity_map_guard = map_from_guard;
-                    } else {
-                        continue;
-                    }
-
-                    if let Ok(map_dest_guard) = data_table_dest.entity_map().try_write() {
-                        dest_entity_map_guard = map_dest_guard;
-                    } else {
-                        continue;
-                    }
-
-                    // If we've successfully locked everything we need this loop, we can proceeed
-                    from_entity_map_guard.remove(entity);
-                    
-                    // The entity should exist in this table, as it has an index,
-                    // we've removed its mapping in its old table, now lets move
-                    // its data and then patch up the new tables mapping, as well as
-                    // any other dbmaps we might be concerned about
-                            
-                    let new_entity_index = data_table_dest.get_next_free_row();
-
-                    // Move the entity from one table to the other, column by column.
-                    // This data is type-erased so we use a special "move" function pointer
-                    // we created with each column that knows what to do
-                    for (component_type, table_entry_from) in from_columns_map_guard.iter() {
-                        if let Some(table_entry_dest) = dest_columns_map_guard.get(component_type) {
-                            let index = (table_entry_from.fn_move)(entity, new_entity_index, &table_entry_from.data, &table_entry_dest.data)?;
-                        } else {
-                            data_table_dest.create_instance(entity, Some(new_entity_index), Some(&dest_columns_map_guard))?;
-                            //deferred_table_construction  = true;
-                            dest_entity_map_guard.insert(*entity, new_entity_index);
-                            let table_entry_dest = dest_columns_map_guard.get(component_type).expect("expect just created column");
-                            let index = (table_entry_from.fn_move)(entity, new_entity_index, &table_entry_from.data, &table_entry_dest.data)?;
-                        }
-                    }
-                    
-                    // patch db maps
-                    // guard scope
-                    {
-                        let mut guard = self.maps
-                            .mut_map::<(EntityId, FamilyId)>()
-                            .ok_or(DbError::FailedToAcquireMapping)?;
-                        guard.insert(*entity, dest_family);
-                    }
-                    drop(from_columns_map_guard);
-                    drop(dest_columns_map_guard);
-
-                    return Ok(())
-                }
-            }
+            Ok(removed)
         }
 
         /// Explicitly sets a component for an entity. This is often the first time
@@ -859,16 +830,7 @@ pub mod reckoning {
             entity: &EntityId,
             component: C
         ) -> Result<(), DbError> {
-            let family = self.maps.get::<(EntityId, FamilyId)>(entity)
-                .ok_or(DbError::EntityBelongsToUnknownFamily)?;
-
-            {
-                self.tables
-                    .get_mut(&family)
-                    .ok_or(DbError::TableDoesntExistForFamily(family))?
-                    .set_component(entity, component)?;
-            }
-            Ok(())
+            todo!()
         }
     }
 
@@ -1062,7 +1024,7 @@ mod vehicle_example {
     use super::reckoning::*;
     use super::transform::*;
 
-    #[derive(Debug, Default)]
+    #[derive(Debug, Default, Clone)]
     pub struct Physics {
         pos: f64,
         vel: f64,
@@ -1076,7 +1038,7 @@ mod vehicle_example {
         }
     }
     
-    #[derive(Debug, Default)]
+    #[derive(Debug, Default, Clone)]
     pub struct Wheels {
         friction: f64,
         torque: f64,
@@ -1085,13 +1047,13 @@ mod vehicle_example {
     }
     impl Component for Wheels {}
     
-    #[derive(Debug, Default)]
+    #[derive(Debug, Default, Clone)]
     pub struct Chassis {
         weight: f64,
     }
     impl Component for Chassis {}
 
-    #[derive(Clone, Debug, Default)]
+    #[derive(Debug, Default, Clone)]
     pub struct Engine {
         power: f64,
         torque: f64,
@@ -1101,14 +1063,14 @@ mod vehicle_example {
     }
     impl Component for Engine {}
 
-    #[derive(Debug, Default)]
+    #[derive(Debug, Default, Clone)]
     pub struct Transmission {
         gears: Vec<f64>,
         current_gear: Option<usize>,
     }
     impl Component for Transmission {}
 
-    #[derive(Debug, Default)]
+    #[derive(Debug, Default, Clone)]
     pub enum Driver {
         #[default]
         SlowAndSteady,
