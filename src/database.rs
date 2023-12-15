@@ -341,7 +341,7 @@ pub mod reckoning {
                 },
             }
         }
-
+        
         fn free(&self, id: EntityId) -> Result<(), EntityAllocError> {
             let mut guard = self.free.lock()?;
             guard.push(id.next_generation());
@@ -518,7 +518,7 @@ pub mod reckoning {
                 .ok_or(CreateEntityError::DbError(DbError::FailedToFindFamilyForSet(unit_family_set.clone())))?;
             
             // add the entity to the unit/null family
-            self.update_mapping(&entity, &family);
+            self.update_mapping(&entity, &family)?;
             self.initialize_row_in(&entity, &family)?;
             Ok(entity)
         }
@@ -533,7 +533,9 @@ pub mod reckoning {
                 if let Some(column) = self.columns.get(key) {
                     column.instantiate_at(index)?;
                 } else {
-                    if let Some(column_header) = self.headers.get(ty) {
+                    if let Some(header) = self.headers.get(ty) {
+                        println!("BUILDING COLUMN DURING ROW INIT");
+                        let column_header = header.clone();
                         let component_type = ComponentType::from(column_header.stable_type_id());
                         let column_key = ColumnKey::from((*table.family_id(), component_type));
                         let column_inner = (column_header.fn_constructor)();
@@ -560,15 +562,15 @@ pub mod reckoning {
         {
             StableTypeId::register_debug_info::<C>();
 
-            let cty = ComponentType::of::<C>();
-            let delta = ComponentDelta::Add(cty);
-
-            let cur_family = self.maps.get_map::<(EntityId, FamilyId)>(&entity);
+            let delta = ComponentDelta::Add(ComponentType::of::<C>());
             let new_family = self.find_new_family(&entity, &delta)?;
             
-            self.resolve_entity_transfer(&entity, &new_family)?;
-            self.set_component_for(&entity, component)?;
-            
+            if self.query_mapping(&entity) == Some(new_family) {
+                self.set_component_for(&entity, component)?;
+            } else {
+                self.resolve_entity_transfer(&entity, &new_family)?;
+                self.set_component_for(&entity, component)?;
+            }
             Ok(())
         }
         
@@ -628,7 +630,7 @@ pub mod reckoning {
                 },
             }
         }
-
+        
         fn family_after_add(
             &self,
             curr_family: &FamilyId,
@@ -693,12 +695,16 @@ pub mod reckoning {
             components.iter().for_each(|ty| {
                 if let Some(header) = self.headers.get(ty) {
                     headers.push(header.clone());
+                } else {
+                    
                 }
             });
-
+            
+            println!("BUILDING A TABLE FOR {:?} COMPONENTS", components.len());
             let mut table = Table::new(family_id, components.clone());
 
             headers.iter().for_each(|header| {
+                println!("BUILDING TABLE COLUMNS LOOP");
                 let component_type = ComponentType::from(header.stable_type_id());
                 let column_inner = (header.fn_constructor)();
                 let column = Column::new(header.clone(), column_inner);
@@ -763,6 +769,7 @@ pub mod reckoning {
         }
         
         fn move_components(&self, entity: &EntityId, from_family: &FamilyId, dest_family: &FamilyId) -> Result<(), DbError> {
+            println!("MOVING COMPONENTS...");
             let from_table = self.tables.get(from_family)
                 .ok_or(DbError::TableDoesntExistForFamily(*from_family))?;
 
@@ -776,11 +783,15 @@ pub mod reckoning {
                 .ok_or(DbError::EntityNotInTable(*entity, *dest_family))?;
             
             let mut result = Ok(());
+            println!("FROM TABLE COLUMN MAP: {:?}", from_table.column_map());
+            println!("DEST TABLE COLUMN MAP: {:?}", dest_table.column_map());
+
+
             from_table.column_map().iter().for_each(|(ty, from_key)| {
                 let from_col = self.columns.get(from_key);
-                let dest_col = from_table.column_map().get(ty)
+                let dest_col = dest_table.column_map().get(ty)
                     .and_then(|key| self.columns.get(key));
-
+                
                 match (from_col, dest_col) {
                     (None, None) => {
                         todo!()
@@ -792,7 +803,7 @@ pub mod reckoning {
                         todo!()
                     },
                     (Some(from), Some(dest)) => {
-                        println!("move components loop");
+                        println!("\tMOVE COMPONENTS LOOP");
                         result = (from.header.fn_move)(entity, &from.data, &dest.data, from_index, dest_index);
                     },
                 }
@@ -812,15 +823,18 @@ pub mod reckoning {
             let from_family: FamilyId = self
                 .query_mapping(entity)
                 .ok_or(DbError::EntityDoesntExist(*entity))?;
-
-            debug_assert!(from_family != *dest_family);
             
             self.initialize_row_in(entity, dest_family)?;
+            println!("---%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%");
+            println!("{}", self);
             self.move_components(entity, &from_family, dest_family)?;
+            println!("{}", self);
+            println!("111%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%");
+
             self.update_mapping(entity, dest_family)?;
             self.remove_entity_from(entity, &from_family)
         }
-
+        
         /// Explicitly sets a component for an entity. This is often the first time
         /// a real component of a given type is created to an entity/family, and thus
         /// we may need to actually initialize the data column in the table we are
@@ -877,7 +891,13 @@ pub mod reckoning {
                     
                     column.instantiate_with(index, component)?;
 
-                    self.columns.insert(new_column_key, column);
+                    println!("BUILDING COLUMN DURING COMPONENT SET");
+                    if let Some(returned) = self.columns.insert(new_column_key, column) {
+                        panic!("wtf columns");
+                    } else {
+                        println!("COLUMN COUNT: {}", self.columns.len());
+                    }
+                    self.headers.insert(component_type, header.clone());
                     table.update_column_map(component_type, new_column_key);
 
                 },
@@ -891,17 +911,26 @@ pub mod reckoning {
 
     impl Display for EntityDatabase {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(f, "db dump\n")?;
+            write!(f, "DATABASE DUMP...\n")?;
             {
                 for item in self.tables.iter() {
-                    write!(f, "{}", *item);
-                }
+                    write!(f, "{}\n", *item)?;
 
-                for item in self.columns.iter() {
-                    write!(f, "{}", *item)?;
+                    for (ty, key) in item.column_map().iter() {
+                        match self.columns.get(key) {
+                            Some(column) => {
+                                write!(f, "{}", *column)?;
+                            },
+                            None => {
+                                write!(f, "[Unable to fetch column] ({})", ty)?;
+                            },
+                        }
+                    }
+
+                    write!(f, "\n\n\n\n")?;
                 }
             }
-            write!(f, "\n")
+            write!(f, "\n\n\n\n")
         }
     }
 
@@ -1245,7 +1274,7 @@ mod vehicle_example {
         
         let mut db = EntityDatabase::new();
         
-        println!("\n\n\n\n{}\n\n\n\n", db);
+        println!("\np0\n{}\n\n", db);
 
         // Define some components from data, these could be loaded from a file
         let v8_engine = Engine { power: 400.0, torque: 190.0, rpm: 0.0, maxrpm: 5600.0, throttle: 0.0 };
@@ -1267,11 +1296,9 @@ mod vehicle_example {
         // Build the entities from the components we choose
         // This can be automated from data
         let sports_car = db.create().unwrap();
-        println!("\n\n\n\n{}\n\n\n\n", db);
         db.add_component(sports_car, v8_engine.clone()).unwrap();
-        println!("\n\n\n\n{}\n\n\n\n", db);
-
         db.add_component(sports_car, five_speed).unwrap();
+
         db.add_component(sports_car, sport_chassis).unwrap();
         db.add_component(sports_car, Wheels::default()).unwrap();
         db.add_component(sports_car, Physics::new()).unwrap();
@@ -1285,8 +1312,11 @@ mod vehicle_example {
         db.add_component(pickup_truck, Physics::new()).unwrap();
         db.add_component(pickup_truck, Driver::SlowAndSteady).unwrap();
 
+        println!("Swap for diesel");
+
         // Let's swap the engine in the truck for something more heavy duty
         db.add_component(pickup_truck, diesel_engine).unwrap();
+        println!("\np5\n{}\n\n", db);
 
         // Create a simulation phase. It is important to note that things
         // that happen in a single phase are unordered. If it is important

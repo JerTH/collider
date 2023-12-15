@@ -141,16 +141,14 @@ impl Table {
 
 impl Display for Table {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "\nTable\n")?;
+        write!(f, "Table\n")?;
         write!(f, "family: {}\n", self.family)?;
-        write!(f, "size: {}\n", self.entity_map.len());
-        write!(f, "num_free: {}\n", self.free.read().expect("unable to read table free list").len());
-
-        {
-            write!(f, "entity_map:\n")?;
-            for item in self.entity_map() {
-                write!(f, " ({} : {})\n", item.0, item.1)?;
-            }
+        write!(f, "components: {:#?}\n", self.components)?;
+        write!(f, "size: {}\n", self.entity_map.len())?;
+        write!(f, "num_free: {}\n", self.free.read().expect("unable to read table free list").len())?;
+        write!(f, "entity_map:\n")?;
+        for item in self.entity_map() {
+            write!(f, " ({} : {})\n", item.0, item.1)?;
         }
         write!(f, "\n")
     }

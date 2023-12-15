@@ -177,7 +177,8 @@ impl<'b> Column {
     /// stored at a given index, it just cares that the memory at
     /// the provided index is initialized
     pub fn instantiate_at(&'b self, index: usize) -> Result<(), DbError> {
-        (self.header.fn_resize)(&self.data, index).map(|_| ())
+        let minimum_size = index + 1;
+        (self.header.fn_resize)(&self.data, minimum_size).map(|_| ())
     }
 
     pub fn instantiate_with<C: Component>(&'b self, index: usize, component: C) -> Result<(), DbError> {
@@ -302,14 +303,16 @@ impl<'b, C: Component> ColumnInner<C> {
         dest_index: usize,
     ) -> Result<(), DbError> {
 
+        println!("DYNAMIC MOVE");
         { // guard scope
             let raw_ptr_from: *const dyn Any = from_ptr.as_ref();
             let raw_ptr_dest: *const dyn Any = dest_ptr.as_ref();
             if raw_ptr_from == raw_ptr_dest {
+                println!("\tNO MOVE NECESSARY...{:?}=={:?}", raw_ptr_from, raw_ptr_dest);
                 return Ok(()) // no move necessary - same objects
             }
         }
-
+        
         let mut from = from_ptr
             .downcast_ref::<ColumnInner<C>>()
             .ok_or(DbError::ColumnTypeDiscrepancy)?
@@ -323,10 +326,9 @@ impl<'b, C: Component> ColumnInner<C> {
         debug_assert!(from.len() > from_index);
         debug_assert!(dest.len() > dest_index);
 
-        unsafe {
-            dest.insert(dest_index, from[from_index].clone());
-        }
+        dest.insert(dest_index, from[from_index].clone());
 
+        println!("SETTING FROM TO DEFAULT");
         from[from_index] = Default::default();
 
         Ok(())
