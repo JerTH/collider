@@ -1,55 +1,18 @@
 use std::{
     collections::HashMap,
     fmt::{self, Display},
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Mutex, RwLock,
-    }, ops::{Deref, DerefMut},
+    sync::RwLock,
 };
-
-use dashmap::DashMap;
 
 use crate::{
-    borrowed::{ColumnIter, ColumnIterMut},
+    column::ColumnKey,
     database::{
-        reckoning::{AnyPtr, ColumnReadGuard, ColumnWriteGuard, DbError, ComponentTypeSet},
-        Component, ComponentType,
+        reckoning::{ComponentTypeSet, DbError},
+        ComponentType,
     },
-    id::{FamilyId, StableTypeId},
-    EntityId, column::{Column, ColumnKey},
+    id::FamilyId,
+    EntityId,
 };
-
-/// Type erased entry into a table which describes a single column
-/// A column contains one type of component. An single index into a table describes
-/// an entity made up of different components in different columns
-pub struct TableEntry {
-    pub tyid: StableTypeId, // The type id of Column<T>  ([Self::data])
-    pub data: AnyPtr,       // Column<T>
-
-    pub fn_constructor: fn() -> AnyPtr,
-    pub fn_instance: fn(&AnyPtr, usize),
-    pub fn_move: fn(&EntityId, usize, &AnyPtr, &AnyPtr) -> Result<usize, DbError>,
-    pub fn_resize: fn(&AnyPtr, usize) -> usize,
-}
-
-impl<'b> TableEntry {
-    pub fn resize_minimum(&self, min_size: usize) -> usize {
-        (self.fn_resize)(&self.data, min_size)
-    }
-    
-}
-
-impl Display for TableEntry {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "table entry")?;
-        write!(
-            f,
-            " type: {} - {}",
-            self.tyid.0,
-            self.tyid.name().unwrap_or("{unknown name}")
-        )
-    }
-}
 
 pub struct Table {
     family: FamilyId,
@@ -69,6 +32,7 @@ pub struct Table {
 }
 
 impl Table {
+    /// Creates a new [`Table`].
     pub fn new(family: FamilyId, components: ComponentTypeSet) -> Self {
         Table {
             family,
@@ -79,59 +43,80 @@ impl Table {
         }
     }
 
+    /// Returns a reference to the family id of this [`Table`].
     pub fn family_id(&self) -> &FamilyId {
         &self.family
     }
 
     pub fn free_count(&self) -> usize {
-        self.free.read().expect("unable to read table free list").len()
+        self.free
+            .read()
+            .expect("unable to read table free list")
+            .len()
     }
-    
+
+    /// Returns a reference to the entity map of this [`Table`].
     pub fn entity_map(&self) -> &HashMap<EntityId, usize> {
         &self.entity_map
     }
-    
+
+    /// Returns a reference to the column map of this [`Table`].
     pub fn column_map(&self) -> &HashMap<ComponentType, ColumnKey> {
         &self.columns
     }
 
+    /// Returns a reference to the components of this [`Table`].
     pub fn components(&self) -> &ComponentTypeSet {
         &self.components
     }
-
+    
     pub fn remove_entity(&mut self, entity: &EntityId) -> Result<EntityId, DbError> {
-        let index = *self.entity_map
+        let index = *self
+            .entity_map
             .get(entity)
             .ok_or(DbError::EntityNotInTable(*entity, self.family))?;
 
-        let guard = self.free
+        self.free
             .write()
             .expect("unable to lock table free list for writes")
             .push(index);
-        drop(guard);
 
         self.entity_map
             .remove(entity)
             .expect("expected entity map to contain this value because of previous access");
-        
+
         Ok(*entity)
     }
-    
+
     /// Gets the index of the next free row in the table
     /// expanding the table if necessary
     pub fn get_next_free_row(&self) -> usize {
         // Do we already have a next free row?
-        if let Some(free) = self.free.write().expect("unable to write table free list").pop() {
-            return free
+        if let Some(free) = self
+            .free
+            .write()
+            .expect("unable to write table free list")
+            .pop()
+        {
+            println!("|\n|\n|\n>HAS INDEX FROM FREE LIST: {}", free);
+            return free;
         } else {
-            return self.entity_map.len()
+            return self.entity_map.len();
         }
     }
-
+    
     pub fn insert_new_entity(&mut self, entity: &EntityId) -> Result<usize, DbError> {
         let index = self.get_next_free_row();
         self.entity_map.insert(*entity, index);
         Ok(index)
+    }
+
+    pub fn get_or_insert_entity(&mut self, entity: &EntityId) -> Result<usize, DbError> {
+        if let Some(index) = self.entity_map().get(entity) {
+            Ok(*index)
+        } else {
+            self.insert_new_entity(entity)
+        }
     }
 
     pub fn update_column_map(&mut self, component_type: ComponentType, column_key: ColumnKey) {
@@ -145,7 +130,14 @@ impl Display for Table {
         write!(f, "family: {}\n", self.family)?;
         write!(f, "components: {:#?}\n", self.components)?;
         write!(f, "size: {}\n", self.entity_map.len())?;
-        write!(f, "num_free: {}\n", self.free.read().expect("unable to read table free list").len())?;
+        write!(
+            f,
+            "num_free: {}\n",
+            self.free
+                .read()
+                .expect("unable to read table free list")
+                .len()
+        )?;
         write!(f, "entity_map:\n")?;
         for item in self.entity_map() {
             write!(f, " ({} : {})\n", item.0, item.1)?;

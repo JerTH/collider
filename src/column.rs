@@ -153,7 +153,7 @@ pub struct ColumnHeader {
     pub tyid: StableTypeId,
     pub fn_constructor: fn() -> AnyPtr,
     pub fn_instance: fn(&AnyPtr, usize),
-    pub fn_move: fn(&EntityId, &AnyPtr, &AnyPtr, usize, usize) -> Result<(), DbError>,
+    pub fn_move: fn(&AnyPtr, &AnyPtr, usize, usize) -> Result<(), DbError>,
     pub fn_resize: fn(&AnyPtr, usize) -> Result<usize, DbError>,
     pub(crate) fn_debug: fn(&AnyPtr, &mut std::fmt::Formatter<'_>) -> std::fmt::Result,
 }
@@ -250,7 +250,9 @@ impl<C: Component> ColumnInner<C> {
 impl<C: Component> Display for ColumnInner<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "\nColumnData ({:?})\n{{\n", self.borrow)?;
-        write!(f, "\t{:?}\n", unsafe { &*self.values.get() })?;
+        for item in unsafe { &*self.values.get() } {
+            write!(f, "\t{:?}\n", item)?;
+        } 
         write!(f, "}}\n")
     }
 }
@@ -296,7 +298,6 @@ impl<'b, C: Component> ColumnInner<C> {
 
     /// Moves a single component from one [Column] to another, if they are the same type
     pub fn dynamic_move(
-        entity: &EntityId,
         from_ptr: &AnyPtr,
         dest_ptr: &AnyPtr,
         from_index: usize,
@@ -323,10 +324,14 @@ impl<'b, C: Component> ColumnInner<C> {
             .ok_or(DbError::ColumnTypeDiscrepancy)?
             .borrow_column_mut();
 
+        println!("\tDYNAMIC MOVE");
+        println!("\tLENS: {}, {}", from.len(), dest.len());
+
         debug_assert!(from.len() > from_index);
         debug_assert!(dest.len() > dest_index);
 
-        dest.insert(dest_index, from[from_index].clone());
+        dest[dest_index] = from[from_index].clone();
+        //dest.insert(dest_index, from[from_index].clone());
 
         println!("SETTING FROM TO DEFAULT");
         from[from_index] = Default::default();
