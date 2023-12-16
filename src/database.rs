@@ -1091,8 +1091,9 @@ pub mod reckoning {
     pub mod macros {
         #[macro_export]
         macro_rules! impl_transformations {
-            ($([$t:ident, $i:tt]),+) => {
-                impl<'db, $($t,)+> Iterator for RowIter<'db, ($($t,)+)>
+            ($([$t:ident, $i:tt]),*) => {
+                #[allow(unused_parens)]
+                impl<'db, $($t),+> Iterator for RowIter<'db, ($($t),+)>
                 where
                     $(
                         $t: MetaData,
@@ -1106,8 +1107,9 @@ pub mod reckoning {
                         todo!()
                     }
                 }
-
-                impl<'db, $($t,)+> IntoIterator for crate::database::Rows<'db, ($($t,)+)>
+                
+                #[allow(unused_parens)]
+                impl<'db, $($t),+> IntoIterator for crate::database::Rows<'db, ($($t),+)>
                 where
                     $(
                         $t: MetaData,
@@ -1117,7 +1119,7 @@ pub mod reckoning {
                     )+
                 {
                     type Item = ($($t::Ref,)+);
-                    type IntoIter = RowIter<'db, ($($t,)+)>;
+                    type IntoIter = RowIter<'db, ($($t),+)>;
 
                     fn into_iter(self) -> Self::IntoIter {
 
@@ -1127,28 +1129,39 @@ pub mod reckoning {
                         let db = self.database();
                         let fs = self.families();
 
-
-                        /*
-                         * TODO:
-                         *
-                         * INSTEAD of creating an iterator directly, we can create a
-                         * collection of jobs to be run, each job correlates to one
-                         * transformation to be run on one family. The job pool can
-                         * then chew through all of the jobs in parallel, demarcated
-                         * by Phases. Threads with downtime between Phases can
-                         * pull background jobs, or pull jobs which populate the next
-                         * set of transformation jobs
-                         *
-                         */
-
-
-
                         //RowIter::new(db, fs)
                         todo!()
                     }
                 }
 
-                impl<'a, $($t,)+> const crate::database::Selection for ($($t,)+)
+                #[allow(unused_parens)]
+                impl<'db, $($t),+> IntoIterator for &crate::database::Rows<'db, ($($t),+)>
+                where
+                    $(
+                        $t: MetaData,
+                        $t: SelectOne<'db>,
+                        <$t as SelectOne<'db>>::Type: Component,
+                        $t: 'static,
+                    )+
+                {
+                    type Item = ($($t::Ref,)+);
+                    type IntoIter = RowIter<'db, ($($t),+)>;
+
+                    fn into_iter(self) -> Self::IntoIter {
+
+                        #![allow(unreachable_code, unused_variables)] todo!("into_iter");
+
+
+                        let db = self.database();
+                        let fs = self.families();
+
+                        //RowIter::new(db, fs)
+                        todo!()
+                    }
+                }
+                
+                #[allow(unused_parens)]
+                impl<'a, $($t),+> const crate::database::Selection for ($($t),+)
                 where
                     $(
                         $t: MetaData,
@@ -1426,10 +1439,10 @@ mod vehicle_example {
         // another set of transformations, you must break them into distinct
         // phases. Each phase will run sequentially, and each transformation
         // within a phase will (try to) run in parallel
-        let mut sim_phase = Phase::new();
-        sim_phase.add_transformation(DriveTrain);
-        sim_phase.add_transformation(WheelPhysics);
-        sim_phase.add_transformation(DriverInput);
+        let mut race = Phase::new();
+        race.add_transformation(DriveTrain);
+        race.add_transformation(WheelPhysics);
+        race.add_transformation(DriverInput);
 
         // The simulation loop. Here we can see that, fundamentally, the
         // simulation is nothing but a set of transformations on our
@@ -1437,7 +1450,7 @@ mod vehicle_example {
         // transformations to the simulation we expand its capabilities
         // while automatically leveraging parallelism
         loop {
-            sim_phase.run_on(&db).unwrap();
+            race.run_on(&db).unwrap();
 
             // Here we allow the database to communicate back with the
             // simulation loop through commands
@@ -1449,6 +1462,156 @@ mod vehicle_example {
 
             break;
         }
+    }
+}
+
+mod collision_example {
+    use crate::transform::{Transformation, TransformationResult, Read, Write};
+
+    use super::*;
+
+    #[derive(Debug, Clone)]
+    enum CollisionShape {
+        Circle { radius: f64 }
+    }
+    impl Component for CollisionShape {}
+    impl Default for CollisionShape {
+        fn default() -> Self {
+            Self::Circle { radius: 0.0 }
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct CollisionEvent {
+        pub location: Vector,
+    }
+
+    impl CollisionEvent {
+        fn new() -> Self {
+            Self {
+                location: Default::default()
+            }
+        }
+    }
+
+    #[derive(Default, Debug, Clone)]    
+    struct CollisionEvents {
+        pending: Vec<CollisionEvent>,
+    }
+    impl Component for CollisionEvents {}
+
+    #[derive(Default, Debug, Clone)]
+    struct Vector(f64, f64, f64);
+    impl Vector {
+        fn distance_to(&self, b_pos: &Vector) -> f64 {
+            let delta = b_pos - self;
+            (
+                delta.0 * delta.0 +
+                delta.1 * delta.1 +
+                delta.2 * delta.2
+            ).sqrt()
+        }
+    }
+    impl Component for Vector {}
+
+    impl std::ops::Add for Vector {
+        type Output = Self;
+
+        fn add(self, rhs: Self) -> Self::Output {
+            Self (
+                self.0 + rhs.0,
+                self.1 + rhs.1,
+                self.2 + rhs.2,
+            )
+        }
+    }
+
+    impl std::ops::Sub for &Vector {
+        type Output = Vector;
+
+        fn sub(self, rhs: Self) -> Self::Output {
+            Vector (
+                self.0 - rhs.0,
+                self.1 - rhs.1,
+                self.2 - rhs.2,
+            )
+        }
+    }
+
+    #[derive(Default, Debug, Clone)]
+    struct Physics {
+        vel: Vector,
+    }
+    impl Component for Physics {}
+
+    struct Motion;
+    impl Transformation for Motion {
+        type Data = (Write<Vector>, Read<Physics>);
+        
+        fn run(data: Rows<Self::Data>) -> TransformationResult {
+            println!("running wheel physics transformation");
+
+            for (position, physics) in data {
+                position.0 += physics.vel.0;
+                position.1 += physics.vel.1;
+                position.2 += physics.vel.2;
+            }
+            Ok(())
+        }
+    }
+
+    struct CollisionDetection;
+    impl Transformation for CollisionDetection {
+        type Data = (Read<Vector>, Read<CollisionShape>, Write<CollisionEvents>);
+        
+        fn run(data: Rows<Self::Data>) -> TransformationResult {
+            for first in (&data).into_iter().enumerate() {
+                let (a_index, (a_pos, a_shape, a_event)) = first;
+                
+                let skip = a_index;
+                for second in (&data).into_iter().skip(skip).enumerate() {
+                    let (b_index, (b_pos, b_shape, b_event)) = second;
+
+                    if a_index == b_index {
+                        continue;
+                    }
+
+                    use CollisionShape::Circle;
+                    match (a_shape, b_shape) {
+                        (Circle { radius: a_radius }, Circle { radius: b_radius }) => {
+                            if a_pos.distance_to(b_pos) <= a_radius + b_radius {
+                                let collision = CollisionEvent::new();
+                                a_event.pending.push(collision.clone());
+                                b_event.pending.push(collision);
+                            }
+                        },
+                    }
+
+                }
+            }
+
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn collision_example() {
+        std::env::set_var("RUST_BACKTRACE", "1");
+
+        let mut db = EntityDatabase::new();
+
+        const NUM_COLLIDERS: usize = 30;
+        const COLLIDER_SIZE: f64 = 10.0;
+
+        for _ in 0..NUM_COLLIDERS {
+            let collider = db.create().unwrap();
+            let position = Vector(0.0, 0.0, 0.0);
+            db.add_component(collider, position).unwrap();
+            db.add_component(collider, Physics::default()).unwrap();
+            db.add_component(collider, CollisionShape::Circle { radius: COLLIDER_SIZE }).unwrap();
+        }
+
+        println!("\np0\n{}\n\n", db);
     }
 }
 

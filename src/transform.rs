@@ -6,6 +6,7 @@
 use crate::database::ComponentType;
 use crate::conflict::ConflictGraph;
 use crate::conflict::Dependent;
+use crate::database::reckoning::AnyPtr;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::marker::PhantomData;
@@ -74,11 +75,18 @@ impl Phase {
             self.subphases.push(subphase);
         });
     }
-
-    pub fn run_on(&mut self, _db: &EntityDatabase) -> PhaseResult {
-        for _ in self.subphases.iter_mut() {
-            todo!()
-            // queue jobs one subphase at a time
+    
+    pub fn run_on(&mut self, db: &EntityDatabase) -> PhaseResult {
+        for subphase in self.subphases.iter_mut() {
+            
+            let mut subphase_results = Vec::new();
+            for (id, dyn_transformation) in subphase {
+                let transform_result = dyn_transformation.ptr.run_on(db);
+                subphase_results.push((id, transform_result));
+            }
+            println!("subphase results:\n");
+            println!("{:#?}\n\n", subphase_results);
+            // TODO: engage multithreading here
         }
         Ok(())
     }
@@ -89,7 +97,9 @@ pub struct TransformationId(std::any::TypeId);
 
 pub trait Transformation: 'static {
     type Data: Selection;
+    
     fn run(data: Rows<Self::Data>) -> TransformationResult;
+    
     fn messages(_: Messages) {
         todo!()
     }
@@ -127,13 +137,13 @@ struct DynTransform {
 impl Dependent for DynTransform {
     type Dependency = ComponentType;
 
-    fn dependencies<'iter>(&'iter self) -> impl Iterator<Item = Self::Dependency> + 'iter {
+    fn dependencies<'iter>(&'iter self) -> impl Iterator<Item = <DynTransform as Dependent>::Dependency> + 'iter {
         self.reads.iter().cloned()
     }
 
     fn exclusive_dependencies<'iter>(
         &'iter self,
-    ) -> impl Iterator<Item = Self::Dependency> + 'iter {
+    ) -> impl Iterator<Item = <DynTransform as Dependent>::Dependency> + 'iter {
         self.writes.iter().cloned()
     }
 }

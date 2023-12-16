@@ -132,7 +132,7 @@ impl<'b, T: 'b> Iterator for ColumnIterMut<'b, T> {
     }
 }
 
-pub const COLUMN_LENGTH_MAXIMUM: usize = 2 ^ 14;
+pub const COLUMN_LENGTH_MAXIMUM: usize = 2048; // 16384
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ColumnKey(CommutativeId);
