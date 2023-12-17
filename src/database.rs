@@ -4,6 +4,7 @@ pub mod reckoning {
     use core::fmt;
     // misc
     use std::any::Any;
+    use std::collections::HashSet;
     use std::error::Error;
     use std::fmt::Debug;
     use std::fmt::Display;
@@ -36,6 +37,7 @@ pub mod reckoning {
     pub(crate) type AnyPtr = Box<dyn Any>;
 
     use dashmap::DashMap;
+    use itertools::Itertools;
     use transfer::TransferGraph;
 
     pub trait Component: Default + Debug + Clone + 'static {}
@@ -224,7 +226,7 @@ pub mod reckoning {
         }
     }
 
-    #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    #[derive(Copy, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct ComponentType(StableTypeId);
 
     impl ComponentType {
@@ -245,7 +247,10 @@ pub mod reckoning {
 
     impl Display for ComponentType {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "{}", self.0.name().unwrap_or("{unknown}"))
+            let full_name = self.0.name().unwrap_or("{unknown}");
+            let split_str = full_name.rsplit_once("::");
+            let substring = split_str.unwrap_or((full_name, full_name)).0;
+            write!(f, "{}", substring)
         }
     }
 
@@ -256,23 +261,32 @@ pub mod reckoning {
     }
 
     impl ComponentTypeSet {
-        fn contains(&self, component: &ComponentType) -> bool {
+        pub fn contains(&self, component: &ComponentType) -> bool {
             self.ptr.contains(component)
         }
 
-        fn iter(&self) -> impl Iterator<Item = &ComponentType> {
+        pub fn iter(&self) -> impl Iterator<Item = &ComponentType> {
             self.ptr.iter()
         }
 
-        fn names(&self) -> String {
+        pub fn names(&self) -> String {
             let out = self.ptr.iter().fold(String::new(), |out, c| {
                 out + &String::from(format!("{}, ", c))
             });
             format!("[{}]", out.trim_end_matches([' ', ',']))
         }
 
-        fn len(&self) -> usize {
+        /// Returns number of [ComponentType]'s in this [ComponentTypeSet]
+        pub fn len(&self) -> usize {
             self.ptr.len()
+        }
+
+        /// Given a [ComponentTypeSet], compute a set of all subsets of
+        /// the unique member components.
+        pub fn power_set(&self) -> Vec<ComponentTypeSet>{
+            self.ptr.iter().cloned().powerset().map(|subset| {
+                ComponentTypeSet::from(subset)
+            }).collect()
         }
     }
 
@@ -285,8 +299,11 @@ pub mod reckoning {
         }
     }
 
-    impl FromIterator<ComponentType> for ComponentTypeSet {
-        fn from_iter<T: IntoIterator<Item = ComponentType>>(iter: T) -> Self {
+    impl<I> From<I> for ComponentTypeSet 
+    where
+        I: IntoIterator<Item = ComponentType>
+    {
+        fn from(iter: I) -> Self {
             let mut id: u64 = 0;
 
             // sum the unique 64 bit id's for each component type
@@ -307,6 +324,29 @@ pub mod reckoning {
             }
         }
     }
+
+    //impl FromIterator<ComponentType> for ComponentTypeSet {
+    //    fn from_iter<T: IntoIterator<Item = ComponentType>>(iter: T) -> Self {
+    //        let mut id: u64 = 0;
+    //
+    //        // sum the unique 64 bit id's for each component type
+    //        // and collect them into a set, use the summed id
+    //        // (which should have a similar likelyhood of collision
+    //        // as any 64 bit hash) and use that as the unique id for
+    //        // the set of components
+    //        let set: BTreeSet<ComponentType> = iter
+    //            .into_iter()
+    //            .map(|c| {
+    //                id = id.wrapping_add(c.0 .0);
+    //                c
+    //            })
+    //            .collect();
+    //        ComponentTypeSet {
+    //            ptr: Arc::new(set),
+    //            id,
+    //        }
+    //    }
+    //}
 
     #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     enum ComponentDelta {
@@ -520,6 +560,9 @@ pub mod reckoning {
         headers: Arc<DashMap<ComponentType, ColumnHeader>>,
     }
 
+    pub(crate) type ColumnMapRef<'db> = dashmap::mapref::one::Ref<'db, ColumnKey, Column>;
+    pub(crate) type TableMapRef<'db> = dashmap::mapref::one::Ref<'db, FamilyId, Table>;
+
     impl EntityDatabase {
         /// Creates a new [EntityDatabase]
         pub fn new() -> Self {
@@ -535,11 +578,19 @@ pub mod reckoning {
             StableTypeId::register_debug_info::<()>();
 
             // setup the unit/null component family
-            let unit_family_set = ComponentTypeSet::from_iter([ComponentType::of::<()>()]);
+            let unit_family_set = ComponentTypeSet::from([ComponentType::of::<()>()]);
             let family_id = db
                 .new_family(unit_family_set)
                 .expect("please report this bug - unable to create unit component family");
             db
+        }
+
+        pub(crate) fn get_column(&self, key: &ColumnKey) -> Option<ColumnMapRef> {
+            self.columns.get(key)
+        }
+
+        pub(crate) fn get_table(&self, family: &FamilyId) -> Option<TableMapRef> {
+            self.tables.get(family)
         }
 
         pub fn update_mapping<'db, K: Clone + Eq + Hash + 'db, V: Clone + 'db>(
@@ -574,7 +625,7 @@ pub mod reckoning {
                 .alloc()
                 .map_err(|_| CreateEntityError::IdAllocatorError)?;
 
-            let unit_family_set = ComponentTypeSet::from_iter([ComponentType::of::<()>()]);
+            let unit_family_set = ComponentTypeSet::from([ComponentType::of::<()>()]);
             let family: FamilyId =
                 self.query_mapping(&unit_family_set)
                     .ok_or(CreateEntityError::DbError(
@@ -718,7 +769,7 @@ pub mod reckoning {
                 } else {
                     let new_components_iter = components.iter().cloned().chain([*new_component]);
 
-                    let new_components = ComponentTypeSet::from_iter(new_components_iter);
+                    let new_components = ComponentTypeSet::from(new_components_iter);
 
                     let family = match self
                         .maps
@@ -797,6 +848,27 @@ pub mod reckoning {
                     .and_modify(|set| set.insert(family_id))
                     .or_insert(FamilyIdSet::from(&[family_id]));
             });
+            
+            drop(guard); // release lock
+
+            // Here we map every unique subset of our component set to this family
+            // This results in 2^n unique mappings. These mappings are used by queries
+            // to string together all of the columns necessary for row iteration.
+            // In the future, we might want to intoduce a lazier mechanism for this.
+            let mut guard = self
+                .maps
+                .mut_map::<(ComponentTypeSet, FamilyIdSet)>()
+                .ok_or(DbError::FailedToAcquireMapping)?;
+
+            for subset in components.power_set() {
+                println!("INSERTING SUBSET");
+                guard
+                    .entry(subset)
+                    .and_modify(|set| set.insert(family_id))
+                    .or_insert(FamilyIdSet::from(&[family_id]));
+            }
+
+            drop(guard);
 
             Ok(family_id)
         }
@@ -894,7 +966,7 @@ pub mod reckoning {
                         todo!()
                     }
                     (Some(from), Some(dest)) => {
-                        println!("\tMOVE COMPONENTS LOOP {}, {}", from_index, dest_index);
+                        println!("\tMOVE COMPONENTS {}, {}", from_index, dest_index);
                         result = (from.header.fn_move)(
                             &from.data, &dest.data, from_index, dest_index,
                         );
@@ -1107,7 +1179,7 @@ pub mod reckoning {
                         todo!()
                     }
                 }
-                
+
                 #[allow(unused_parens)]
                 impl<'db, $($t),+> IntoIterator for crate::database::Rows<'db, ($($t),+)>
                 where
@@ -1122,12 +1194,10 @@ pub mod reckoning {
                     type IntoIter = RowIter<'db, ($($t),+)>;
 
                     fn into_iter(self) -> Self::IntoIter {
-
                         #![allow(unreachable_code, unused_variables)] todo!("into_iter");
 
 
                         let db = self.database();
-                        let fs = self.families();
 
                         //RowIter::new(db, fs)
                         todo!()
@@ -1148,12 +1218,10 @@ pub mod reckoning {
                     type IntoIter = RowIter<'db, ($($t),+)>;
 
                     fn into_iter(self) -> Self::IntoIter {
-
                         #![allow(unreachable_code, unused_variables)] todo!("into_iter");
 
 
                         let db = self.database();
-                        let fs = self.families();
 
                         //RowIter::new(db, fs)
                         todo!()
@@ -1466,8 +1534,9 @@ mod vehicle_example {
 }
 
 mod collision_example {
+    use integrator::{Vector, Point};
     use crate::transform::{Transformation, TransformationResult, Read, Write};
-
+    
     use super::*;
 
     #[derive(Debug, Clone)]
@@ -1480,7 +1549,7 @@ mod collision_example {
             Self::Circle { radius: 0.0 }
         }
     }
-
+    
     #[derive(Debug, Clone)]
     struct CollisionEvent {
         pub location: Vector,
@@ -1501,76 +1570,47 @@ mod collision_example {
     impl Component for CollisionEvents {}
 
     #[derive(Default, Debug, Clone)]
-    struct Vector(f64, f64, f64);
-    impl Vector {
-        fn distance_to(&self, b_pos: &Vector) -> f64 {
-            let delta = b_pos - self;
-            (
-                delta.0 * delta.0 +
-                delta.1 * delta.1 +
-                delta.2 * delta.2
-            ).sqrt()
-        }
-    }
-    impl Component for Vector {}
-
-    impl std::ops::Add for Vector {
-        type Output = Self;
-
-        fn add(self, rhs: Self) -> Self::Output {
-            Self (
-                self.0 + rhs.0,
-                self.1 + rhs.1,
-                self.2 + rhs.2,
-            )
-        }
-    }
-
-    impl std::ops::Sub for &Vector {
-        type Output = Vector;
-
-        fn sub(self, rhs: Self) -> Self::Output {
-            Vector (
-                self.0 - rhs.0,
-                self.1 - rhs.1,
-                self.2 - rhs.2,
-            )
-        }
-    }
-
-    #[derive(Default, Debug, Clone)]
     struct Physics {
+        pos: Point,
         vel: Vector,
+        acc: Vector,
     }
     impl Component for Physics {}
 
     struct Motion;
     impl Transformation for Motion {
-        type Data = (Write<Vector>, Read<Physics>);
-        
-        fn run(data: Rows<Self::Data>) -> TransformationResult {
-            println!("running wheel physics transformation");
+        type Data = Write<Physics>;
 
-            for (position, physics) in data {
-                position.0 += physics.vel.0;
-                position.1 += physics.vel.1;
-                position.2 += physics.vel.2;
+        fn run(data: Rows<Self::Data>) -> TransformationResult {
+            for physics in data {
+                let physics = physics.0;
+                physics.pos = physics.pos + physics.vel;
+                physics.pos = physics.pos + physics.vel;
+                physics.pos = physics.pos + physics.vel;
             }
             Ok(())
         }
     }
 
     struct CollisionDetection;
+    impl CollisionDetection {
+        // detailed implementation of collision detection can go here
+        // e.g., this system can keep track of positions and velocities
+        // internally in a more efficient spatial data structure and perform
+        // tests there, and then simply write the resulting authoritative
+        // data back into publicly visible components
+    }
+
     impl Transformation for CollisionDetection {
-        type Data = (Read<Vector>, Read<CollisionShape>, Write<CollisionEvents>);
-        
+        type Data = (Read<Physics>, Read<CollisionShape>, Write<CollisionEvents>);
+
         fn run(data: Rows<Self::Data>) -> TransformationResult {
             for first in (&data).into_iter().enumerate() {
-                let (a_index, (a_pos, a_shape, a_event)) = first;
+                let (a_index, (a_physics, a_shape, a_event)) = first;
                 
                 let skip = a_index;
                 for second in (&data).into_iter().skip(skip).enumerate() {
-                    let (b_index, (b_pos, b_shape, b_event)) = second;
+                    let (b_index, (b_physics, b_shape, b_event)) = second;
 
                     if a_index == b_index {
                         continue;
@@ -1579,14 +1619,13 @@ mod collision_example {
                     use CollisionShape::Circle;
                     match (a_shape, b_shape) {
                         (Circle { radius: a_radius }, Circle { radius: b_radius }) => {
-                            if a_pos.distance_to(b_pos) <= a_radius + b_radius {
+                            if a_physics.pos.distance_to(&b_physics.pos) <= a_radius + b_radius {
                                 let collision = CollisionEvent::new();
                                 a_event.pending.push(collision.clone());
                                 b_event.pending.push(collision);
                             }
                         },
                     }
-
                 }
             }
 
@@ -1605,10 +1644,18 @@ mod collision_example {
 
         for _ in 0..NUM_COLLIDERS {
             let collider = db.create().unwrap();
-            let position = Vector(0.0, 0.0, 0.0);
-            db.add_component(collider, position).unwrap();
-            db.add_component(collider, Physics::default()).unwrap();
-            db.add_component(collider, CollisionShape::Circle { radius: COLLIDER_SIZE }).unwrap();
+            let position = Point::new(0.0, 0.0, 0.0);
+            let physics = Physics { 
+                pos: position, 
+                vel: Default::default(), 
+                acc: Default::default()
+            };
+            let shape = CollisionShape::Circle {
+                radius: COLLIDER_SIZE
+            };
+
+            db.add_component(collider, physics).unwrap();
+            db.add_component(collider, shape).unwrap();
         }
 
         println!("\np0\n{}\n\n", db);

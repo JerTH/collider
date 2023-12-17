@@ -24,7 +24,7 @@ pub mod conflict;
 //pub(crate) mod family;
 //pub(crate) mod xform;
 
-pub(crate) mod database; // replaces db
+pub mod database; // replaces db
 
 //pub use db::EntityDatabase;
 pub use id::EntityId;

@@ -333,7 +333,7 @@ impl<'b, C: Component> ColumnInner<C> {
         dest[dest_index] = from[from_index].clone();
         //dest.insert(dest_index, from[from_index].clone());
 
-        println!("SETTING FROM TO DEFAULT");
+        println!("SETTING SOURCE TO DEFAULT");
         from[from_index] = Default::default();
 
         Ok(())

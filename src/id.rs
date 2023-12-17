@@ -66,7 +66,7 @@ impl<'i> FromIterator<&'i ComponentType> for FamilyId {
 pub(crate) type FamilyIdSetImpl = DashSet<FamilyId>; // INVARIANT: This type MUST NOT accept duplicates 
 pub(crate) type FamilyIdSetInner = (CommutativeId, FamilyIdSetImpl);
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct FamilyIdSet {
     ptr: Arc<FamilyIdSetInner>, // thread-local?
 }
@@ -78,6 +78,14 @@ impl FamilyIdSet {
 
     pub fn insert(&self, family_id: FamilyId) {
         self.ptr.1.insert(family_id);
+    }
+
+    pub fn clone_into_vec(&self) -> Vec<FamilyId> {
+        let mut collection = Vec::new();
+        self.ptr.1.iter().for_each(|id| {
+            collection.push(id.clone());
+        });
+        collection
     }
 }
 

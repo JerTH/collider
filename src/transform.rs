@@ -3,10 +3,15 @@
 //! Functionality related to transforming data contained in an
 //! [crate::database::reckoning::EntityDatabase]
 
+use crate::column;
+use crate::column::Column;
+use crate::column::ColumnKey;
+use crate::column::ColumnRef;
 use crate::database::ComponentType;
 use crate::conflict::ConflictGraph;
 use crate::conflict::Dependent;
-use crate::database::reckoning::AnyPtr;
+use crate::database::reckoning::ColumnMapRef;
+use crate::database::reckoning::ComponentTypeSet;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::marker::PhantomData;
@@ -16,11 +21,11 @@ use crate::database::EntityDatabase;
 use crate::id::FamilyId;
 use crate::id::FamilyIdSet;
 
-pub struct Phase {
-    subphases: Vec<HashMap<TransformationId, DynTransform>>,
+pub struct Phase<'db> {
+    subphases: Vec<HashMap<TransformationId, DynTransform<'db>>>,
 }
 
-impl Phase {
+impl<'db> Phase<'db> {
     pub fn new() -> Self {
         Phase {
             subphases: Vec::new(),
@@ -35,6 +40,8 @@ impl Phase {
         // Rebuilding the graph with every insert is super inefficient,
         // some sort of from_iter implementation or a defered building
         // of the conflict graph would help here
+        // On the other hand, it really shouldn't happen much after the
+        // database is initialized and most/all transformations are loaded
 
         let reads = T::Data::READS
             .iter()
@@ -76,7 +83,7 @@ impl Phase {
         });
     }
     
-    pub fn run_on(&mut self, db: &EntityDatabase) -> PhaseResult {
+    pub fn run_on(&mut self, db: &'db EntityDatabase) -> PhaseResult {
         for subphase in self.subphases.iter_mut() {
             
             let mut subphase_results = Vec::new();
@@ -99,7 +106,7 @@ pub trait Transformation: 'static {
     type Data: Selection;
     
     fn run(data: Rows<Self::Data>) -> TransformationResult;
-    
+
     fn messages(_: Messages) {
         todo!()
     }
@@ -113,28 +120,66 @@ pub trait Transformation: 'static {
     }
 }
 
-pub trait Runs {
-    fn run_on(&self, db: &EntityDatabase) -> TransformationResult;
+pub trait Runs<'db> {
+    fn run_on(&self, db: &'db EntityDatabase) -> TransformationResult;
 }
 
-impl<RTuple> Runs for RTuple
+impl<'db, RTuple> Runs<'db> for RTuple
 where
     RTuple: Transformation,
     RTuple::Data: Selection,
 {
     fn run_on(&self, db: &EntityDatabase) -> TransformationResult {
-        let rows = RTuple::Data::as_rows::<RTuple::Data>(db);
+        println!("READS:  {:?}", RTuple::Data::READS);
+        println!("WRITES: {:?}", RTuple::Data::WRITES);
+
+        let mut row_components: Vec<ComponentType> = Vec::new();
+
+        let reads = RTuple::Data::READS;
+        let writes = RTuple::Data::WRITES;
+
+        reads.iter().zip(writes.iter()).for_each(|(read, write)| {
+            let component_access = read.or(*write).expect("expected read/write");
+            println!("ACCESS: {:?}", &component_access);
+            row_components.push(component_access);
+        });
+        
+        let component_set: ComponentTypeSet = ComponentTypeSet::from(row_components);
+        let matching_families: Vec<FamilyId> = db
+            .query_mapping::<ComponentTypeSet, FamilyIdSet>(&component_set)
+            .expect("expected established component family")
+            .clone_into_vec();
+
+        let mut column_keys: HashMap<ComponentType, Vec<ColumnKey>> = HashMap::new();
+        
+        matching_families
+            .iter()
+            .map(|family| {
+                db.get_table(family).expect("expected table")
+            }).for_each(|table| {
+                for component in component_set.iter() {
+                    let key = table.column_map().get(component).expect("expected column key");
+                    column_keys.entry(*component).and_modify(|entry| entry.push(*key));
+                }
+            });
+        
+        let rows = Rows::<RTuple::Data> {
+            db,
+            keys: column_keys,
+            marker: PhantomData,
+        };
+        
         RTuple::run(rows)
     }
 }
 
-struct DynTransform {
-    ptr: Box<dyn Runs>,
+struct DynTransform<'db> {
+    ptr: Box<dyn Runs<'db>>,
     reads: Vec<ComponentType>,
     writes: Vec<ComponentType>,
 }
 
-impl Dependent for DynTransform {
+impl<'db> Dependent for DynTransform<'db> {
     type Dependency = ComponentType;
 
     fn dependencies<'iter>(&'iter self) -> impl Iterator<Item = <DynTransform as Dependent>::Dependency> + 'iter {
@@ -221,15 +266,9 @@ where
 
 #[const_trait]
 pub trait Selection {
-    fn as_rows<'db, T>(db: &'db EntityDatabase) -> Rows<'db, T> {
-        #![allow(unreachable_code, unused_variables)]
-        unimplemented!()
-        //crate::database::Rows {
-        //    db,
-        //    fs,
-        //    marker: PhantomData::default(),
-        //}
-    }
+    //fn as_rows<'db, T>(db: &'db EntityDatabase) -> Rows<'db, T> {
+    //    
+    //}
 
     const READS: &'static [Option<ComponentType>];
     const WRITES: &'static [Option<ComponentType>];
@@ -237,7 +276,7 @@ pub trait Selection {
 
 pub struct Rows<'db, RTuple> {
     db: &'db EntityDatabase,
-    fs: FamilyIdSet,
+    keys: HashMap<ComponentType, Vec<ColumnKey>>,
     marker: PhantomData<RTuple>,
 }
 
@@ -245,8 +284,9 @@ impl<'db, RTuple> Rows<'db, RTuple> {
     pub fn database(&self) -> &'db EntityDatabase {
         self.db
     }
-    pub fn families(&self) -> FamilyIdSet {
-        self.fs.clone()
+
+    pub fn column_keys(&self) -> &HashMap<ComponentType, Vec<ColumnKey>>{
+        &self.keys
     }
 }
 
