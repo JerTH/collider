@@ -3,18 +3,27 @@
 //! Functionality related to transforming data contained in an
 //! [crate::database::reckoning::EntityDatabase]
 
+use crate::borrowed::BorrowRef;
+use crate::borrowed::BorrowRefEither;
 use crate::column;
 use crate::column::Column;
+use crate::column::ColumnIter;
+use crate::column::ColumnIterMut;
 use crate::column::ColumnKey;
 use crate::column::ColumnRef;
+use crate::column::ColumnRefMut;
 use crate::database::ComponentType;
 use crate::conflict::ConflictGraph;
 use crate::conflict::Dependent;
 use crate::database::reckoning::ColumnMapRef;
 use crate::database::reckoning::ComponentTypeSet;
+use std::any::Any;
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::marker::PhantomData;
+use std::os::raw::c_void;
+use std::ptr::NonNull;
 
 use crate::database::Component;
 use crate::database::EntityDatabase;
@@ -58,7 +67,7 @@ impl<'db> Phase<'db> {
             ptr: Box::new(tr),
             reads,
             writes,
-        }; // ========== Inject Read/Write requirements here
+        };
 
         let transform_tuple = (T::id(), dyn_transform);
 
@@ -150,8 +159,8 @@ where
             .expect("expected established component family")
             .clone_into_vec();
 
-        let mut column_keys: HashMap<ComponentType, Vec<ColumnKey>> = HashMap::new();
-        
+        let mut column_keys: Vec<ColumnKey> = Vec::new();
+
         matching_families
             .iter()
             .map(|family| {
@@ -159,13 +168,14 @@ where
             }).for_each(|table| {
                 for component in component_set.iter() {
                     let key = table.column_map().get(component).expect("expected column key");
-                    column_keys.entry(*component).and_modify(|entry| entry.push(*key));
+                    column_keys.push(*key);
                 }
             });
         
         let rows = Rows::<RTuple::Data> {
             db,
             keys: column_keys,
+            width: component_set.len(),
             marker: PhantomData,
         };
         
@@ -182,13 +192,13 @@ struct DynTransform<'db> {
 impl<'db> Dependent for DynTransform<'db> {
     type Dependency = ComponentType;
 
-    fn dependencies<'iter>(&'iter self) -> impl Iterator<Item = <DynTransform as Dependent>::Dependency> + 'iter {
+    fn dependencies<'iter>(&'iter self)
+    -> impl Iterator<Item = <DynTransform as Dependent>::Dependency> + 'iter {
         self.reads.iter().cloned()
     }
 
-    fn exclusive_dependencies<'iter>(
-        &'iter self,
-    ) -> impl Iterator<Item = <DynTransform as Dependent>::Dependency> + 'iter {
+    fn exclusive_dependencies<'iter>(&'iter self)
+    -> impl Iterator<Item = <DynTransform as Dependent>::Dependency> + 'iter {
         self.writes.iter().cloned()
     }
 }
@@ -196,6 +206,7 @@ impl<'db> Dependent for DynTransform<'db> {
 pub struct Read<C: Component> {
     marker: PhantomData<C>,
 }
+
 pub struct Write<C: Component> {
     marker: PhantomData<C>,
 }
@@ -212,17 +223,49 @@ impl<'db, C> const MetaData for Write<C> where C: Component {}
 
 pub struct RowIter<'db, RTuple> {
     pub(crate) db: &'db EntityDatabase,
-    pub(crate) family: FamilyId,
-    pub(crate) marker: PhantomData<RTuple>,
+    marker: PhantomData<RTuple>,
+
+    /// Table-wise list of columns to iterate through
+    pub(crate) keys: Vec<ColumnKey>,
+    pub(crate) borrows: Vec<(BorrowRefEither<'db>, NonNull<c_void>)>,
+
+    pub(crate) width: usize,
+    pub(crate) table_index: usize,
+    pub(crate) column_index: usize,
 }
 
 impl<'db, RTuple> RowIter<'db, RTuple> {
-    pub fn new(db: &'db EntityDatabase, family: FamilyId) -> Self {
+    pub fn new(db: &'db EntityDatabase) -> Self {
         Self {
             db,
-            family,
-            marker: PhantomData::default(),
+            marker: Default::default(),
+            keys: Default::default(),
+            borrows: Default::default(),
+            width: Default::default(),
+            table_index: Default::default(),
+            column_index: Default::default(),
         }
+    }
+}
+
+pub struct Rows<'db, RTuple> {
+    pub(crate) db: &'db EntityDatabase,
+    pub(crate) keys: Vec<ColumnKey>,
+    pub(crate) width: usize,
+    pub(crate) marker: PhantomData<RTuple>,
+}
+
+impl<'db, RTuple> Rows<'db, RTuple> {
+    pub fn database(&self) -> &'db EntityDatabase {
+        self.db
+    }
+    
+    pub fn keys(&self) -> &Vec<ColumnKey> {
+        &self.keys
+    }
+
+    pub fn width(&self) -> usize {
+        self.width
     }
 }
 
@@ -230,9 +273,12 @@ impl<'db, RTuple> RowIter<'db, RTuple> {
 pub trait SelectOne<'db> {
     type Ref;
     type Type;
+    type BorrowType;
+
     fn reads() -> Option<ComponentType> {
         None
     }
+
     fn writes() -> Option<ComponentType> {
         None
     }
@@ -243,8 +289,9 @@ where
     Self: 'db,
     C: Component,
 {
-    type Type = C;
     type Ref = &'db Self::Type;
+    type Type = C;
+    type BorrowType = ColumnRef<'db, C>;
 
     fn reads() -> Option<ComponentType> {
         Some(ComponentType::of::<Self::Type>())
@@ -256,8 +303,9 @@ where
     Self: 'db,
     C: Component,
 {
-    type Type = C;
     type Ref = &'db mut Self::Type;
+    type Type = C;
+    type BorrowType = ColumnRefMut<'db, C>;
 
     fn writes() -> Option<ComponentType> {
         Some(ComponentType::of::<Self::Type>())
@@ -266,28 +314,8 @@ where
 
 #[const_trait]
 pub trait Selection {
-    //fn as_rows<'db, T>(db: &'db EntityDatabase) -> Rows<'db, T> {
-    //    
-    //}
-
     const READS: &'static [Option<ComponentType>];
     const WRITES: &'static [Option<ComponentType>];
-}
-
-pub struct Rows<'db, RTuple> {
-    db: &'db EntityDatabase,
-    keys: HashMap<ComponentType, Vec<ColumnKey>>,
-    marker: PhantomData<RTuple>,
-}
-
-impl<'db, RTuple> Rows<'db, RTuple> {
-    pub fn database(&self) -> &'db EntityDatabase {
-        self.db
-    }
-
-    pub fn column_keys(&self) -> &HashMap<ComponentType, Vec<ColumnKey>>{
-        &self.keys
-    }
 }
 
 pub struct Messages {}

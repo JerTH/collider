@@ -3,38 +3,43 @@ use std::{
     fmt::Display,
     marker::PhantomData,
     ops::{Deref, DerefMut},
-    ptr::NonNull, any::Any,
+    ptr::NonNull, any::Any, borrow::Borrow, os::raw::c_void,
 };
 
 use crate::{
-    borrowed::{BorrowError, BorrowRef, BorrowRefMut, BorrowSentinel},
+    borrowed::{BorrowError, BorrowRef, BorrowRefMut, BorrowSentinel, BorrowRefEither},
     database::{
         reckoning::{AnyPtr, DbError, Family},
         Component, ComponentType,
     },
     id::{StableTypeId, CommutativeId, FamilyId},
-    EntityId,
+    EntityId, transform::{Read, Write},
 };
 
-pub type ColumnType<C> = Vec<C>;
-
 pub struct ColumnRef<'b, C: Component> {
-    column: NonNull<ColumnType<C>>,
+    pointer: NonNull<Vec<C>>,
     borrow: BorrowRef<'b>,
 }
 
 impl<'b, C: Component> ColumnRef<'b, C> {
-    pub fn new(column: NonNull<ColumnType<C>>, borrow: BorrowRef<'b>) -> Self {
-        Self { column, borrow }
+    pub fn new(column: NonNull<Vec<C>>, borrow: BorrowRef<'b>) -> Self {
+        Self { pointer: column, borrow }
+    }
+
+    pub fn ascend(self) -> ColumnRefMut<'b, C> {
+        ColumnRefMut {
+            pointer: self.pointer,
+            borrow: self.borrow.ascend(),
+        }
     }
 }
 
 impl<C: Component> Deref for ColumnRef<'_, C> {
-    type Target = ColumnType<C>;
+    type Target = Vec<C>;
     fn deref(&self) -> &Self::Target {
         // SAFETY
         // Safe to access because we hold a runtime checked borrow
-        unsafe { self.column.as_ref() }
+        unsafe { self.pointer.as_ref() }
     }
 }
 
@@ -44,7 +49,7 @@ impl<'b, C: Component> IntoIterator for ColumnRef<'b, C> {
     fn into_iter(self) -> Self::IntoIter {
         let size = self.len();
         ColumnIter {
-            column: unsafe { self.column.as_ref() },
+            column: unsafe { self.pointer.as_ref() },
             borrow: self.borrow,
             size,
             next: 0usize,
@@ -53,7 +58,7 @@ impl<'b, C: Component> IntoIterator for ColumnRef<'b, C> {
 }
 
 pub struct ColumnIter<'b, C> {
-    column: &'b ColumnType<C>,
+    column: &'b Vec<C>,
     borrow: BorrowRef<'b>,
     size: usize,
     next: usize,
@@ -64,46 +69,52 @@ impl<'b, C: 'b> Iterator for ColumnIter<'b, C> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let val = self.column.get(self.next);
-        self.next = std::cmp::min(self.next + 1, self.size);
+        self.next += 1;
         val
     }
 }
 
-pub struct ColumnRefMut<'b, T> {
-    column: NonNull<Vec<T>>,
+pub struct ColumnRefMut<'b, C> {
+    pointer: NonNull<Vec<C>>,
     borrow: BorrowRefMut<'b>,
+}
+
+impl<'b, C: Component> From<ColumnRef<'b, C>> for ColumnRefMut<'b, C> {
+    fn from(value: ColumnRef<'b, C>) -> Self {
+        value.ascend()
+    }
 }
 
 impl<'b, T> ColumnRefMut<'b, T> {
     pub fn new(column: NonNull<Vec<T>>, borrow: BorrowRefMut<'b>) -> Self {
-        Self { column, borrow }
+        Self { pointer: column, borrow }
     }
 }
 
-impl<T> Deref for ColumnRefMut<'_, T> {
-    type Target = Vec<T>;
+impl<C> Deref for ColumnRefMut<'_, C> {
+    type Target = Vec<C>;
     fn deref(&self) -> &Self::Target {
         // SAFETY
         // Safe to access because we hold a runtime checked borrow
-        unsafe { self.column.as_ref() }
+        unsafe { self.pointer.as_ref() }
     }
 }
 
-impl<T> DerefMut for ColumnRefMut<'_, T> {
+impl<C> DerefMut for ColumnRefMut<'_, C> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY
         // Safe to access because we hold a runtime checked borrow
-        unsafe { self.column.as_mut() }
+        unsafe { self.pointer.as_mut() }
     }
 }
 
-impl<'b, T: 'b> IntoIterator for ColumnRefMut<'b, T> {
-    type Item = &'b mut T;
-    type IntoIter = ColumnIterMut<'b, T>;
+impl<'b, C: 'b> IntoIterator for ColumnRefMut<'b, C> {
+    type Item = &'b mut C;
+    type IntoIter = ColumnIterMut<'b, C>;
     fn into_iter(mut self) -> Self::IntoIter {
         let size = self.len();
         Self::IntoIter {
-            column: unsafe { self.column.as_mut() },
+            column: unsafe { self.pointer.as_mut() },
             borrow: self.borrow,
             size,
             next: 0usize,
@@ -112,12 +123,12 @@ impl<'b, T: 'b> IntoIterator for ColumnRefMut<'b, T> {
     }
 }
 
-pub struct ColumnIterMut<'b, T> {
-    column: &'b mut Vec<T>,
+pub struct ColumnIterMut<'b, C> {
+    column: &'b mut Vec<C>,
     borrow: BorrowRefMut<'b>,
     size: usize,
     next: usize,
-    invariant: PhantomData<&'b mut T>,
+    invariant: PhantomData<&'b mut C>,
 }
 impl<'b, T: 'b> Iterator for ColumnIterMut<'b, T> {
     type Item = &'b mut T;
@@ -171,7 +182,58 @@ pub struct Column {
     pub data: AnyPtr,       // ColumnInner<T>
 }
 
+pub trait BorrowAsRawParts<'b> {
+    unsafe fn borrow_as_raw_parts(self) -> (BorrowRefEither<'b>, NonNull<std::os::raw::c_void>);
+}
+
+impl<'b, C: Component> BorrowAsRawParts<'b> for ColumnRef<'b, C> {
+    unsafe fn borrow_as_raw_parts(self) -> (BorrowRefEither<'b>, NonNull<std::os::raw::c_void>) {
+        let ptr = self.pointer.as_ptr() as *mut std::os::raw::c_void;
+        let non_null = NonNull::new(ptr)
+            .expect("expeceted non-null pointer");
+
+        (BorrowRefEither::Immutable(self.borrow), non_null)
+    }
+}
+
+impl<'b, C: Component> BorrowAsRawParts<'b> for ColumnRefMut<'b, C> {
+    unsafe fn borrow_as_raw_parts(self) -> (BorrowRefEither<'b>, NonNull<std::os::raw::c_void>) {
+        let ptr = self.pointer.as_ptr() as *mut std::os::raw::c_void;
+        let non_null = NonNull::new(ptr)
+            .expect("expeceted non-null pointer");
+        
+        (BorrowRefEither::Mutable(self.borrow), non_null)
+    }
+}
+
+pub trait BorrowColumnAs<'b, C, R> {
+    fn borrow_column_as(&'b self) -> R;
+}
+
+impl<'b, C: Component> BorrowColumnAs<'b, C, ColumnRef<'b, C>> for Column {
+    fn borrow_column_as(&'b self) -> ColumnRef<'b, C> {
+        self.get_ref()
+    }
+    //fn borrow_column_as<ColumnRef<'b, C>>(&'b self) -> ColumnRef<'b, C> {
+    //    self.get_ref()
+    //}
+}
+
+impl<'b, C: Component> BorrowColumnAs<'b, C, ColumnRefMut<'b, C>> for Column {
+    fn borrow_column_as(&'b self) -> ColumnRefMut<'b, C> {
+        self.get_ref().ascend()
+    }
+    //fn borrow_column_as(&'b self) -> ColumnRefMut<'b, C> {
+    //    let r = self.get_ref();
+    //    r.ascend()
+    //}
+}
+
 impl<'b> Column {
+    pub fn new(header: ColumnHeader, data: AnyPtr) -> Column {
+        Column { header, data }
+    }
+
     /// Instantiate a component instance at the specified index
     /// This function doesn't actually really care about the data
     /// stored at a given index, it just cares that the memory at
@@ -186,37 +248,42 @@ impl<'b> Column {
 
         let column = self.data
             .downcast_ref::<ColumnInner<C>>()
-            .expect("expected matching column types");
+            .expect("instantiate_with: expected matching column types");
         let mut column_ref = column.borrow_column_mut();
         column_ref[index] = component;
         Ok(())
     }
     
-    pub fn iter<T: Component>(&'b self) -> ColumnIter<'b, T> {
+    pub(crate) fn iter<T: Component>(&'b self) -> ColumnIter<'b, T> {
         debug_assert!(StableTypeId::of::<T>() == self.header.tyid);
         let column = self
             .data
             .downcast_ref::<ColumnInner<T>>()
-            .expect("expected matching column types");
+            .expect("iter: expected matching column types");
         let column_ref = column.borrow_column();
         let column_iter = column_ref.into_iter();
         column_iter
     }
 
-    pub fn iter_mut<T: Component>(&'b self) -> ColumnIterMut<'b, T> {
+    pub(crate) fn iter_mut<T: Component>(&'b self) -> ColumnIterMut<'b, T> {
         debug_assert!(StableTypeId::of::<T>() == self.header.tyid);
         let column = self
             .data
             .downcast_ref::<ColumnInner<T>>()
-            .expect("expected matching column types");
+            .expect("iter_mut: expected matching column types");
         let column_mut = column.borrow_column_mut();
         let column_iter_mut = column_mut.into_iter();
 
         column_iter_mut
     }
 
-    pub fn new(header: ColumnHeader, data: AnyPtr) -> Column {
-        Column { header, data }
+    pub(crate) fn get_ref<C: Component>(&'b self) -> ColumnRef<'b, C> {
+        let inner = self
+            .data
+            .downcast_ref::<ColumnInner<C>>()
+            .expect("get_ref: expected matching column types");
+        
+        inner.borrow_column()
     }
 }
 
@@ -237,8 +304,8 @@ pub(crate) struct ColumnInner<C: Component> {
     /// For an entity in a table, its associated components must
     /// always occupy the same index in each column. Failure to
     /// uphold this invariant will result in undefined behavior
-    values: UnsafeCell<Vec<C>>,
-    borrow: BorrowSentinel,
+    pub(crate) values: UnsafeCell<Vec<C>>,
+    pub(crate) borrow: BorrowSentinel,
 }
 
 impl<C: Component> ColumnInner<C> {

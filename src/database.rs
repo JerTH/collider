@@ -29,6 +29,7 @@ pub mod reckoning {
     use crate::column::ColumnHeader;
     use crate::column::ColumnInner;
     use crate::column::ColumnKey;
+    use crate::column::BorrowColumnAs;
     use crate::id::*;
     use crate::table::*;
     use crate::EntityId;
@@ -39,6 +40,8 @@ pub mod reckoning {
     use dashmap::DashMap;
     use itertools::Itertools;
     use transfer::TransferGraph;
+
+    use super::SelectOne;
 
     pub trait Component: Default + Debug + Clone + 'static {}
 
@@ -1155,12 +1158,28 @@ pub mod reckoning {
         }
     } // transfer ======================================================================
 
+    pub trait GetAsRefType<'db, R, S: SelectOne<'db>> {
+        fn get_as_ref_type(&self, index: usize) -> R;
+    }
+    
+    // Type system gymnastics
+    impl<'db, S: SelectOne<'db>> GetAsRefType<'db, S::Ref, S> for *mut Vec<<S as SelectOne<'db>>::Type>
+    {
+        fn get_as_ref_type(&self, index: usize) -> S::Ref {
+            todo!()
+        }
+    }
+
+
+
     /// Macros
     ///
     /// These macros make it possible to perform fast and ergonomic
     /// selections of data in an [super::EntityDatabase]
     #[macro_use]
     pub mod macros {
+        use crate::column::BorrowColumnAs;
+
         #[macro_export]
         macro_rules! impl_transformations {
             ($([$t:ident, $i:tt]),*) => {
@@ -1176,10 +1195,29 @@ pub mod reckoning {
                     type Item = ($($t::Ref,)+);
 
                     fn next(&mut self) -> Option<Self::Item> {
-                        todo!()
+                        if self.table_index + self.width > self.keys.len() {
+                            return None;
+                        }
+                        
+                        use crate::database::reckoning::GetAsRefType;
+                        let row: Self::Item = (
+                            $(
+                                unsafe {
+                                    // Here we take a reference to our borrow and an opaque pointer to the column we're interested in
+                                    // and through various type system gymnastics we transform the pointer into an accessor with the
+                                    // correct mutablity
+                                    let (borrow, pointer): &(crate::borrowed::BorrowRefEither<'db>, std::ptr::NonNull<std::os::raw::c_void>) = self.borrows.get_unchecked(self.table_index + $i);
+                                    let casted: std::ptr::NonNull<Vec<$t::Type>> = pointer.cast::<Vec<$t::Type>>();
+                                    let raw: *mut Vec<$t::Type> = casted.as_ptr();
+                                    <*mut Vec<$t::Type> as GetAsRefType<'db, $t::Ref, $t>>::get_as_ref_type(&raw, self.column_index)
+                                }
+                                //(&*(self.borrows.get_unchecked(self.table_index + $i).1.cast::<Vec<$t::Type>>()).as_ptr()).get_as_ref_type<R = $t::Ref>(self.column_index)
+                            ,)+
+                        );
+                        Some(row)
                     }
                 }
-
+                
                 #[allow(unused_parens)]
                 impl<'db, $($t),+> IntoIterator for crate::database::Rows<'db, ($($t),+)>
                 where
@@ -1187,6 +1225,10 @@ pub mod reckoning {
                         $t: MetaData,
                         $t: SelectOne<'db>,
                         <$t as SelectOne<'db>>::Type: Component,
+                        <$t as SelectOne<'db>>::BorrowType: crate::column::BorrowAsRawParts<'db>,
+                        crate::column::Column: crate::column::BorrowColumnAs<'db, <$t as SelectOne<'db>>::Type, <$t as SelectOne<'db>>::BorrowType>,
+                        //<$t as SelectOne<'db>>::BorrowType: From<crate::column::ColumnRef<'db, <$t as SelectOne<'db>>::Type>>,
+                        //crate::column::Column: crate::column::BorrowColumnAs<'db, <$t as SelectOne<'db>>::BorrowType>,
                         $t: 'static,
                     )+
                 {
@@ -1194,13 +1236,7 @@ pub mod reckoning {
                     type IntoIter = RowIter<'db, ($($t),+)>;
 
                     fn into_iter(self) -> Self::IntoIter {
-                        #![allow(unreachable_code, unused_variables)] todo!("into_iter");
-
-
-                        let db = self.database();
-
-                        //RowIter::new(db, fs)
-                        todo!()
+                        (&self).into_iter()
                     }
                 }
 
@@ -1211,6 +1247,9 @@ pub mod reckoning {
                         $t: MetaData,
                         $t: SelectOne<'db>,
                         <$t as SelectOne<'db>>::Type: Component,
+                        <$t as SelectOne<'db>>::BorrowType: crate::column::BorrowAsRawParts<'db>,
+                        //<$t as SelectOne<'db>>::BorrowType: From<crate::column::ColumnRef<'db, <$t as SelectOne<'db>>::Type>>,
+                        crate::column::Column: crate::column::BorrowColumnAs<'db, <$t as SelectOne<'db>>::Type, <$t as SelectOne<'db>>::BorrowType>,
                         $t: 'static,
                     )+
                 {
@@ -1218,13 +1257,25 @@ pub mod reckoning {
                     type IntoIter = RowIter<'db, ($($t),+)>;
 
                     fn into_iter(self) -> Self::IntoIter {
-                        #![allow(unreachable_code, unused_variables)] todo!("into_iter");
-
-
                         let db = self.database();
-
-                        //RowIter::new(db, fs)
-                        todo!()
+                        let mut iter = RowIter::<'db, ($($t),+)>::new(db);
+                        
+                        for (_, key) in self.keys.iter().enumerate() {
+                            let borrows: ($($t::BorrowType,)+) = ($(
+                                {
+                                    use crate::column::BorrowColumnAs;
+                                    let column = db.get_column(key).expect("expected initialized column for iteration");
+                                    <$t as SelectOne<'db>>::BorrowType::from(column.borrow_column_as())
+                                }
+                            ,)+);
+                            $(
+                                unsafe {
+                                    use crate::column::BorrowAsRawParts;
+                                    iter.borrows.push((borrows.$i).borrow_as_raw_parts());
+                                }
+                            )+
+                        }
+                        iter
                     }
                 }
                 
@@ -1267,16 +1318,7 @@ impl_transformations!([A, 0], [B, 1], [C, 2], [D, 3]);
 impl_transformations!([A, 0], [B, 1], [C, 2], [D, 3], [E, 4]);
 impl_transformations!([A, 0], [B, 1], [C, 2], [D, 3], [E, 4], [F, 5]);
 impl_transformations!([A, 0], [B, 1], [C, 2], [D, 3], [E, 4], [F, 5], [G, 6]);
-impl_transformations!(
-    [A, 0],
-    [B, 1],
-    [C, 2],
-    [D, 3],
-    [E, 4],
-    [F, 5],
-    [G, 6],
-    [H, 7]
-);
+impl_transformations!([A, 0], [B, 1], [C, 2], [D, 3], [E, 4], [F, 5], [G, 6], [H, 7]);
 
 // tests ===============================================================================
 
