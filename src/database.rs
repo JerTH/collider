@@ -33,6 +33,8 @@ pub mod reckoning {
     use crate::id::*;
     use crate::table::*;
     use crate::EntityId;
+    use crate::transform::Read;
+    use crate::transform::Reads;
 
     // typedefs
     pub(crate) type AnyPtr = Box<dyn Any>;
@@ -327,7 +329,7 @@ pub mod reckoning {
             }
         }
     }
-
+    
     //impl FromIterator<ComponentType> for ComponentTypeSet {
     //    fn from_iter<T: IntoIterator<Item = ComponentType>>(iter: T) -> Self {
     //        let mut id: u64 = 0;
@@ -730,7 +732,7 @@ pub mod reckoning {
             // were collected per-thread and then the full stream was stitched
             // together at the end of each phase, or a wait-free queue was used
 
-            todo!()
+            None
         }
 
         /// Computes the destination family for a given entity, after
@@ -863,13 +865,15 @@ pub mod reckoning {
                 .mut_map::<(ComponentTypeSet, FamilyIdSet)>()
                 .ok_or(DbError::FailedToAcquireMapping)?;
 
+            let mut total_powerset = 0;
             for subset in components.power_set() {
-                println!("INSERTING SUBSET");
                 guard
                     .entry(subset)
                     .and_modify(|set| set.insert(family_id))
                     .or_insert(FamilyIdSet::from(&[family_id]));
+                total_powerset += 1;
             }
+            println!("GENERATED {} SUBSETS", total_powerset);
 
             drop(guard);
 
@@ -1158,22 +1162,29 @@ pub mod reckoning {
         }
     } // transfer ======================================================================
 
-    pub trait GetAsRefType<'db, R, S: SelectOne<'db>> {
-        fn get_as_ref_type(&self, index: usize) -> R;
+    pub trait GetAsRefType<'db, S: SelectOne<'db>, R> {
+        unsafe fn get_as_ref_type(&self, index: usize) -> Option<R>;
     }
     
     // Type system gymnastics
-    impl<'db, S: SelectOne<'db>> GetAsRefType<'db, S::Ref, S> for *mut Vec<<S as SelectOne<'db>>::Type>
+    impl<'db, S: SelectOne<'db>> GetAsRefType<'db, S, &'db S::Type> for *mut Vec<<S as SelectOne<'db>>::Type>
     {
-        fn get_as_ref_type(&self, index: usize) -> S::Ref {
-            todo!()
+        unsafe fn get_as_ref_type(&self, index: usize) -> Option<&'db S::Type> {
+            (**self).get(index)
         }
     }
 
-
+    impl<'db, S: SelectOne<'db>> GetAsRefType<'db, S, &'db mut S::Type> for *mut Vec<<S as SelectOne<'db>>::Type>
+    {
+        unsafe fn get_as_ref_type(&self, index: usize) -> Option<&'db mut S::Type> {
+            (**self).get_mut(index)
+        }
+    }
 
     /// Macros
     ///
+    /// WARNING: ABSOLUTELY RIDICULOUS TYPE SYSTEM/MACRO SHENANIGANS BEYOND THIS POINT
+    /// 
     /// These macros make it possible to perform fast and ergonomic
     /// selections of data in an [super::EntityDatabase]
     #[macro_use]
@@ -1190,12 +1201,14 @@ pub mod reckoning {
                         $t: MetaData,
                         $t: SelectOne<'db>,
                         <$t as SelectOne<'db>>::Type: Component,
+                        *mut Vec<$t::Type>: crate::database::reckoning::GetAsRefType<'db, $t, <$t as SelectOne<'db>>::Ref>,
                     )+
                 {
                     type Item = ($($t::Ref,)+);
 
                     fn next(&mut self) -> Option<Self::Item> {
-                        if self.table_index + self.width > self.keys.len() {
+                        if self.table_index >= (self.keys.len() / self.width) {
+                            println!("TABLE INDEX GREATER THAN KEY SET LENGTH, BREAKING ITERATION ({}/{}) - keys={}", self.table_index, self.column_index, self.keys.len());
                             return None;
                         }
                         
@@ -1205,15 +1218,24 @@ pub mod reckoning {
                                 unsafe {
                                     // Here we take a reference to our borrow and an opaque pointer to the column we're interested in
                                     // and through various type system gymnastics we transform the pointer into an accessor with the
-                                    // correct mutablity
-                                    let (borrow, pointer): &(crate::borrowed::BorrowRefEither<'db>, std::ptr::NonNull<std::os::raw::c_void>) = self.borrows.get_unchecked(self.table_index + $i);
+                                    // correct mutablity, try to get a component from the column, and check for out of bounds
+                                    let (_, pointer): &(crate::borrowed::BorrowRefEither, std::ptr::NonNull<std::os::raw::c_void>) = self.borrows.get_unchecked(self.table_index + $i);
                                     let casted: std::ptr::NonNull<Vec<$t::Type>> = pointer.cast::<Vec<$t::Type>>();
                                     let raw: *mut Vec<$t::Type> = casted.as_ptr();
-                                    <*mut Vec<$t::Type> as GetAsRefType<'db, $t::Ref, $t>>::get_as_ref_type(&raw, self.column_index)
+                                    if let Some(result) = <*mut Vec<$t::Type> as GetAsRefType<'db, $t, <$t as SelectOne<'db>>::Ref>>::get_as_ref_type(&raw, self.column_index) {
+                                        result
+                                    } else {
+                                        println!("TABLE PRODUCED NO RESULTS - RECURSING ({}/{})", self.table_index, self.column_index);
+                                        self.table_index += 1;
+                                        self.column_index = 0;
+                                        return self.next()
+                                    }
                                 }
                                 //(&*(self.borrows.get_unchecked(self.table_index + $i).1.cast::<Vec<$t::Type>>()).as_ptr()).get_as_ref_type<R = $t::Ref>(self.column_index)
                             ,)+
                         );
+                        println!("GOT ROW FROM TABLE ({}/{})", self.table_index, self.column_index);
+                        self.column_index += 1;
                         Some(row)
                     }
                 }
@@ -1225,10 +1247,9 @@ pub mod reckoning {
                         $t: MetaData,
                         $t: SelectOne<'db>,
                         <$t as SelectOne<'db>>::Type: Component,
-                        <$t as SelectOne<'db>>::BorrowType: crate::column::BorrowAsRawParts<'db>,
-                        crate::column::Column: crate::column::BorrowColumnAs<'db, <$t as SelectOne<'db>>::Type, <$t as SelectOne<'db>>::BorrowType>,
-                        //<$t as SelectOne<'db>>::BorrowType: From<crate::column::ColumnRef<'db, <$t as SelectOne<'db>>::Type>>,
-                        //crate::column::Column: crate::column::BorrowColumnAs<'db, <$t as SelectOne<'db>>::BorrowType>,
+                        <$t as SelectOne<'db>>::BorrowType: crate::column::BorrowAsRawParts,
+                        crate::column::Column: crate::column::BorrowColumnAs<<$t as SelectOne<'db>>::Type, <$t as SelectOne<'db>>::BorrowType>,
+                        *mut Vec<$t::Type>: crate::database::reckoning::GetAsRefType<'db, $t, <$t as SelectOne<'db>>::Ref>,
                         $t: 'static,
                     )+
                 {
@@ -1247,9 +1268,9 @@ pub mod reckoning {
                         $t: MetaData,
                         $t: SelectOne<'db>,
                         <$t as SelectOne<'db>>::Type: Component,
-                        <$t as SelectOne<'db>>::BorrowType: crate::column::BorrowAsRawParts<'db>,
-                        //<$t as SelectOne<'db>>::BorrowType: From<crate::column::ColumnRef<'db, <$t as SelectOne<'db>>::Type>>,
-                        crate::column::Column: crate::column::BorrowColumnAs<'db, <$t as SelectOne<'db>>::Type, <$t as SelectOne<'db>>::BorrowType>,
+                        <$t as SelectOne<'db>>::BorrowType: crate::column::BorrowAsRawParts,
+                        *mut Vec<$t::Type>: crate::database::reckoning::GetAsRefType<'db, $t, <$t as SelectOne<'db>>::Ref>,
+                        crate::column::Column: crate::column::BorrowColumnAs<<$t as SelectOne<'db>>::Type, <$t as SelectOne<'db>>::BorrowType>,
                         $t: 'static,
                     )+
                 {
@@ -1260,11 +1281,16 @@ pub mod reckoning {
                         let db = self.database();
                         let mut iter = RowIter::<'db, ($($t),+)>::new(db);
                         
-                        for (_, key) in self.keys.iter().enumerate() {
+                        //for key in self.keys.iter() {
+                        //    println!("\tII{:?}", *db.get_column(key).unwrap());
+                        //}
+
+                        for i in 0..(self.keys.len() / self.width) {
                             let borrows: ($($t::BorrowType,)+) = ($(
-                                {
+                                unsafe {
                                     use crate::column::BorrowColumnAs;
-                                    let column = db.get_column(key).expect("expected initialized column for iteration");
+                                    let col_idx = (i * self.width) + $i;
+                                    let column = db.get_column(self.keys.get_unchecked(col_idx)).expect("expected initialized column for iteration");
                                     <$t as SelectOne<'db>>::BorrowType::from(column.borrow_column_as())
                                 }
                             ,)+);
@@ -1275,6 +1301,8 @@ pub mod reckoning {
                                 }
                             )+
                         }
+                        iter.keys = self.keys.clone();
+                        iter.width = self.width;
                         iter
                     }
                 }
@@ -1459,7 +1487,7 @@ mod vehicle_example {
             println!("running wheel physics transformation");
 
             for (wheels, chassis, physics) in data {
-                physics.acc = wheels.torque / wheels.radius / chassis.weight;
+                physics.acc = wheels.torque / f64::max(wheels.radius, 1.0) / f64::max(chassis.weight, 1.0);
                 physics.vel += physics.acc;
                 physics.pos += physics.vel;
                 wheels.rpm = physics.vel * (60.0 / (2.0 * 3.14159) * wheels.radius);
@@ -1473,8 +1501,6 @@ mod vehicle_example {
         std::env::set_var("RUST_BACKTRACE", "1");
 
         let mut db = EntityDatabase::new();
-
-        println!("\np0\n{}\n\n", db);
 
         // Define some components from data, these could be loaded from a file
         let v8_engine = Engine {
@@ -1541,8 +1567,6 @@ mod vehicle_example {
         db.add_component(economy_car, cheap_chassis.clone()).unwrap();
         db.add_component(economy_car, five_speed.clone()).unwrap();
 
-        println!("\np5\n{}\n\n", db);
-
         // Create a simulation phase. It is important to note that things
         // that happen in a single phase are unordered. If it is important
         // for a certain set of transformations to happen before or after
@@ -1559,9 +1583,10 @@ mod vehicle_example {
         // dataset run over and over. By adding more components and
         // transformations to the simulation we expand its capabilities
         // while automatically leveraging parallelism
+        let mut loops = 0;
         loop {
             race.run_on(&db).unwrap();
-
+            
             // Here we allow the database to communicate back with the
             // simulation loop through commands
             while let Some(command) = db.query_commands() {
@@ -1570,7 +1595,14 @@ mod vehicle_example {
                 }
             }
 
-            break;
+            if loops < 3 {
+                loops += 1;
+                //println!("\nsim iteration: {}\n{}\n\n", loops, db);
+            } else {
+                println!("\nsim iteration: {}\n{}\n\n", loops, db);
+                println!("Exiting!");
+                break;
+            }
         }
     }
 }

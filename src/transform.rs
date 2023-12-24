@@ -7,8 +7,6 @@ use crate::borrowed::BorrowRef;
 use crate::borrowed::BorrowRefEither;
 use crate::column;
 use crate::column::Column;
-use crate::column::ColumnIter;
-use crate::column::ColumnIterMut;
 use crate::column::ColumnKey;
 use crate::column::ColumnRef;
 use crate::column::ColumnRefMut;
@@ -153,7 +151,7 @@ where
             row_components.push(component_access);
         });
         
-        let component_set: ComponentTypeSet = ComponentTypeSet::from(row_components);
+        let component_set: ComponentTypeSet = ComponentTypeSet::from(row_components.clone());
         let matching_families: Vec<FamilyId> = db
             .query_mapping::<ComponentTypeSet, FamilyIdSet>(&component_set)
             .expect("expected established component family")
@@ -166,12 +164,21 @@ where
             .map(|family| {
                 db.get_table(family).expect("expected table")
             }).for_each(|table| {
-                for component in component_set.iter() {
+
+                // iterating row_components here instead of component_set BECAUSE component sets are
+                // ordered sets, whereas row_components is simply a vector with the same ordering
+                // as the combination of our sparse read and write lists
+                for component in row_components.iter() {
                     let key = table.column_map().get(component).expect("expected column key");
                     column_keys.push(*key);
                 }
             });
         
+        //println!("{:#?}", component_set);
+        //for key in column_keys.iter() {
+        //    println!("{:?}", *db.get_column(key).unwrap());
+        //}
+
         let rows = Rows::<RTuple::Data> {
             db,
             keys: column_keys,
@@ -227,7 +234,7 @@ pub struct RowIter<'db, RTuple> {
 
     /// Table-wise list of columns to iterate through
     pub(crate) keys: Vec<ColumnKey>,
-    pub(crate) borrows: Vec<(BorrowRefEither<'db>, NonNull<c_void>)>,
+    pub(crate) borrows: Vec<(BorrowRefEither, NonNull<c_void>)>,
 
     pub(crate) width: usize,
     pub(crate) table_index: usize,
@@ -291,7 +298,7 @@ where
 {
     type Ref = &'db Self::Type;
     type Type = C;
-    type BorrowType = ColumnRef<'db, C>;
+    type BorrowType = ColumnRef<C>;
 
     fn reads() -> Option<ComponentType> {
         Some(ComponentType::of::<Self::Type>())
@@ -305,7 +312,7 @@ where
 {
     type Ref = &'db mut Self::Type;
     type Type = C;
-    type BorrowType = ColumnRefMut<'db, C>;
+    type BorrowType = ColumnRefMut<C>;
 
     fn writes() -> Option<ComponentType> {
         Some(ComponentType::of::<Self::Type>())
