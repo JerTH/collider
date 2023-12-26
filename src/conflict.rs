@@ -393,14 +393,14 @@ mod test {
             graph.insert(index, resource);
         }
 
-        let conflict_free = graph.build();
+        let _conflict_free = graph.build();
 
-        for (index, bucket) in conflict_free.iter().enumerate() {
-            println!("bucket: {}", index);
-            for (i, consumer) in bucket {
-                let s_writes = format!("*{:?}*", consumer.w);
-                println!("\t\t{:3}:{:24}{:?}", i, s_writes, consumer.r);
-            }
-        }
+        //for (index, bucket) in conflict_free.iter().enumerate() {
+        //    println!("bucket: {}", index);
+        //    for (i, consumer) in bucket {
+        //        let s_writes = format!("*{:?}*", consumer.w);
+        //        println!("\t\t{:3}:{:24}{:?}", i, s_writes, consumer.r);
+        //    }
+        //}
     }
 }

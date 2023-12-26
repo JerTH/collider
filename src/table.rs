@@ -98,7 +98,7 @@ impl Table {
             .expect("unable to write table free list")
             .pop()
         {
-            println!("HAS INDEX FROM FREE LIST: {}", free);
+            //println!("HAS INDEX FROM FREE LIST: {}", free);
             return free;
         } else {
             return self.entity_map.len();

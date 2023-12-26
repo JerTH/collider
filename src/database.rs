@@ -660,7 +660,7 @@ pub mod reckoning {
                     column.instantiate_at(index)?;
                 } else {
                     if let Some(header) = self.headers.get(ty) {
-                        println!("BUILDING COLUMN DURING ROW INIT");
+                        //println!("BUILDING COLUMN DURING ROW INIT");
                         let column_header = header.clone();
                         let component_type = ComponentType::from(column_header.stable_type_id());
                         let column_key = ColumnKey::from((*table.family_id(), component_type));
@@ -822,11 +822,11 @@ pub mod reckoning {
                 }
             });
 
-            println!("BUILDING A TABLE FOR {:?} COMPONENTS", components.len());
+            //println!("BUILDING A TABLE FOR {:?} COMPONENTS", components.len());
             let mut table = Table::new(family_id, components.clone());
 
             headers.iter().for_each(|header| {
-                println!("BUILDING TABLE COLUMNS LOOP");
+                //println!("BUILDING TABLE COLUMNS LOOP");
                 let component_type = ComponentType::from(header.stable_type_id());
                 let column_inner = (header.fn_constructor)();
                 let column = Column::new(header.clone(), column_inner);
@@ -873,7 +873,7 @@ pub mod reckoning {
                     .or_insert(FamilyIdSet::from(&[family_id]));
                 total_powerset += 1;
             }
-            println!("GENERATED {} SUBSETS", total_powerset);
+            //println!("GENERATED {} SUBSETS", total_powerset);
 
             drop(guard);
 
@@ -930,7 +930,7 @@ pub mod reckoning {
             from_family: &FamilyId,
             dest_family: &FamilyId,
         ) -> Result<(), DbError> {
-            println!("MOVING COMPONENTS...");
+            //println!("MOVING COMPONENTS...");
             let from_table = self
                 .tables
                 .get(from_family)
@@ -952,8 +952,8 @@ pub mod reckoning {
                 .ok_or(DbError::EntityNotInTable(*entity, *dest_family))?;
 
             let mut result = Ok(());
-            println!("FROM TABLE COLUMN MAP: {:?}", from_table.column_map());
-            println!("DEST TABLE COLUMN MAP: {:?}", dest_table.column_map());
+            //println!("FROM TABLE COLUMN MAP: {:?}", from_table.column_map());
+            //println!("DEST TABLE COLUMN MAP: {:?}", dest_table.column_map());
 
             from_table.column_map().iter().for_each(|(ty, from_key)| {
                 let from_col = self.columns.get(from_key);
@@ -973,7 +973,7 @@ pub mod reckoning {
                         todo!()
                     }
                     (Some(from), Some(dest)) => {
-                        println!("\tMOVE COMPONENTS {}, {}", from_index, dest_index);
+                        //println!("\tMOVE COMPONENTS {}, {}", from_index, dest_index);
                         result = (from.header.fn_move)(
                             &from.data, &dest.data, from_index, dest_index,
                         );
@@ -1208,7 +1208,6 @@ pub mod reckoning {
 
                     fn next(&mut self) -> Option<Self::Item> {
                         if self.table_index >= (self.keys.len() / self.width) {
-                            println!("TABLE INDEX GREATER THAN KEY SET LENGTH, BREAKING ITERATION ({}/{}) - keys={}", self.table_index, self.column_index, self.keys.len());
                             return None;
                         }
                         
@@ -1225,16 +1224,13 @@ pub mod reckoning {
                                     if let Some(result) = <*mut Vec<$t::Type> as GetAsRefType<'db, $t, <$t as SelectOne<'db>>::Ref>>::get_as_ref_type(&raw, self.column_index) {
                                         result
                                     } else {
-                                        println!("TABLE PRODUCED NO RESULTS - RECURSING ({}/{})", self.table_index, self.column_index);
                                         self.table_index += 1;
                                         self.column_index = 0;
                                         return self.next()
                                     }
                                 }
-                                //(&*(self.borrows.get_unchecked(self.table_index + $i).1.cast::<Vec<$t::Type>>()).as_ptr()).get_as_ref_type<R = $t::Ref>(self.column_index)
                             ,)+
                         );
-                        println!("GOT ROW FROM TABLE ({}/{})", self.table_index, self.column_index);
                         self.column_index += 1;
                         Some(row)
                     }
@@ -1387,7 +1383,7 @@ mod vehicle_example {
         weight: f64,
     }
     impl Component for Chassis {}
-
+    
     #[derive(Debug, Default, Clone)]
     pub struct Engine {
         power: f64,
@@ -1413,16 +1409,22 @@ mod vehicle_example {
     }
     impl Component for Driver {}
 
+    #[derive(Debug, Default, Clone)]
+    pub struct VehicleName {
+        name: String,
+    }
+    impl Component for VehicleName {}
+
     struct DriveTrain;
     impl Transformation for DriveTrain {
-        type Data = (Read<Engine>, Read<Transmission>, Write<Wheels>);
+        type Data = (Read<Transmission>, Write<Engine>, Write<Wheels>);
 
         fn run(data: Rows<Self::Data>) -> TransformationResult {
             println!("running drive-train transformation");
 
             // calculate engine torque & rpm
 
-            for (engine, transmission, wheels) in data {
+            for (transmission, engine, wheels) in data {
                 if let Some(gear) = transmission.current_gear {
                     if let Some(gear_ratio) = transmission.gears.get(gear) {
                         wheels.torque = engine.torque * gear_ratio
@@ -1442,12 +1444,12 @@ mod vehicle_example {
 
             for (driver, transmission, engine) in data {
                 match driver {
-                    Driver::SlowAndSteady => match engine.rpm {
-                        0.0..=5000.0 => match transmission.current_gear {
-                            Some(gear) => engine.throttle = 0.4,
+                    Driver::SlowAndSteady => match engine.rpm as u64 {
+                        0..=4999 => match transmission.current_gear {
+                            Some(_) => engine.throttle = 0.4,
                             None => transmission.current_gear = Some(0),
                         },
-                        5000.0.. => {
+                        5000.. => {
                             engine.throttle = 0.0;
                             if let Some(gear) = transmission.current_gear {
                                 if gear < transmission.gears.len() {
@@ -1455,14 +1457,13 @@ mod vehicle_example {
                                 }
                             }
                         }
-                        _ => engine.throttle = 0.0,
                     },
-                    Driver::PedalToTheMetal => match engine.rpm {
-                        0.0..=5000.0 => match transmission.current_gear {
-                            Some(gear) => engine.throttle = 1.0,
+                    Driver::PedalToTheMetal => match engine.rpm as u64 {
+                        0..=4999 => match transmission.current_gear {
+                            Some(_) => engine.throttle = 1.0,
                             None => transmission.current_gear = Some(0),
                         },
-                        5000.0.. => {
+                        5000.. => {
                             engine.throttle = 0.0;
                             if let Some(gear) = transmission.current_gear {
                                 if gear < transmission.gears.len() {
@@ -1470,7 +1471,6 @@ mod vehicle_example {
                                 }
                             }
                         }
-                        _ => engine.throttle = 0.0,
                     },
                 }
             }
@@ -1492,6 +1492,19 @@ mod vehicle_example {
                 physics.pos += physics.vel;
                 wheels.rpm = physics.vel * (60.0 / (2.0 * 3.14159) * wheels.radius);
             }
+            Ok(())
+        }
+    }
+
+    struct PrintVehicleStatus;
+    impl Transformation for PrintVehicleStatus {
+        type Data = (Read<VehicleName>, Read<Physics>, Read<Engine>);
+
+        fn run(data: Rows<Self::Data>) -> TransformationResult {
+            for (name, phys, engine) in data {
+                println!("{:14}: {:5}m @ {:5}m/s ({:5}rpm)", name.name, phys.pos, phys.vel, engine.rpm);
+            }
+
             Ok(())
         }
     }
@@ -1560,6 +1573,7 @@ mod vehicle_example {
             .unwrap();
 
         // Let's swap the engine in the truck for something more heavy duty
+        // Entities can only ever have a single component of a given type
         db.add_component(pickup_truck, diesel_engine).unwrap();
 
         let economy_car = db.create().unwrap();
@@ -1567,6 +1581,11 @@ mod vehicle_example {
         db.add_component(economy_car, cheap_chassis.clone()).unwrap();
         db.add_component(economy_car, five_speed.clone()).unwrap();
 
+        // Lets name the 3 vehicles
+        db.add_component(sports_car, VehicleName { name: String::from("Sports Car") }).unwrap();
+        db.add_component(pickup_truck, VehicleName { name: String::from("Pickup Truck") }).unwrap();
+        db.add_component(economy_car, VehicleName { name: String::from("Economy Car") }).unwrap();
+        
         // Create a simulation phase. It is important to note that things
         // that happen in a single phase are unordered. If it is important
         // for a certain set of transformations to happen before or after
@@ -1574,9 +1593,10 @@ mod vehicle_example {
         // phases. Each phase will run sequentially, and each transformation
         // within a phase will (try to) run in parallel
         let mut race = Phase::new();
-        race.add_transformation(DriveTrain);
+        //race.add_transformation(DriveTrain);
         race.add_transformation(WheelPhysics);
         race.add_transformation(DriverInput);
+        //race.add_transformation(PrintVehicleStatus);
 
         // The simulation loop. Here we can see that, fundamentally, the
         // simulation is nothing but a set of transformations on our
@@ -1586,7 +1606,7 @@ mod vehicle_example {
         let mut loops = 0;
         loop {
             race.run_on(&db).unwrap();
-            
+
             // Here we allow the database to communicate back with the
             // simulation loop through commands
             while let Some(command) = db.query_commands() {
@@ -1597,9 +1617,7 @@ mod vehicle_example {
 
             if loops < 3 {
                 loops += 1;
-                //println!("\nsim iteration: {}\n{}\n\n", loops, db);
             } else {
-                println!("\nsim iteration: {}\n{}\n\n", loops, db);
                 println!("Exiting!");
                 break;
             }
@@ -1731,8 +1749,6 @@ mod collision_example {
             db.add_component(collider, physics).unwrap();
             db.add_component(collider, shape).unwrap();
         }
-
-        println!("\np0\n{}\n\n", db);
     }
 }
 

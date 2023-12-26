@@ -89,7 +89,7 @@ impl BorrowRef {
                 // Here we take the value of `self.sentinel` WITHOUT dropping `self`, 
                 // to avoid trigging our custom drop code which would subsequently modify
                 // our sentinel value undesireably
-                let sentinel = unsafe { std::ptr::read(&self.sentinel) };
+                let sentinel = unsafe { std::ptr::read_unaligned(&self.sentinel) };
                 std::mem::forget(self);
                 
                 return BorrowRefMut {

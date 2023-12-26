@@ -38,7 +38,7 @@ impl<'db> Phase<'db> {
             subphases: Vec::new(),
         }
     }
-
+    
     pub fn add_transformation<T>(&mut self, tr: T)
     where
         T: Transformation,
@@ -98,8 +98,8 @@ impl<'db> Phase<'db> {
                 let transform_result = dyn_transformation.ptr.run_on(db);
                 subphase_results.push((id, transform_result));
             }
-            println!("subphase results:\n");
-            println!("{:#?}\n\n", subphase_results);
+            //println!("subphase results:\n");
+            //println!("{:#?}\n\n", subphase_results);
             // TODO: engage multithreading here
         }
         Ok(())
@@ -137,8 +137,8 @@ where
     RTuple::Data: Selection,
 {
     fn run_on(&self, db: &EntityDatabase) -> TransformationResult {
-        println!("READS:  {:?}", RTuple::Data::READS);
-        println!("WRITES: {:?}", RTuple::Data::WRITES);
+        //println!("READS:  {:?}", RTuple::Data::READS);
+        //println!("WRITES: {:?}", RTuple::Data::WRITES);
 
         let mut row_components: Vec<ComponentType> = Vec::new();
 
@@ -147,7 +147,7 @@ where
 
         reads.iter().zip(writes.iter()).for_each(|(read, write)| {
             let component_access = read.or(*write).expect("expected read/write");
-            println!("ACCESS: {:?}", &component_access);
+            //println!("ACCESS: {:?}", &component_access);
             row_components.push(component_access);
         });
         

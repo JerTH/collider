@@ -286,12 +286,12 @@ impl<'b, C: Component> ColumnInner<C> {
         dest_index: usize,
     ) -> Result<(), DbError> {
 
-        println!("DYNAMIC MOVE");
+        //println!("DYNAMIC MOVE");
         { // guard scope
             let raw_ptr_from: *const dyn Any = from_ptr.as_ref();
             let raw_ptr_dest: *const dyn Any = dest_ptr.as_ref();
             if raw_ptr_from == raw_ptr_dest {
-                println!("\tNO MOVE NECESSARY...{:?}=={:?}", raw_ptr_from, raw_ptr_dest);
+                //println!("\tNO MOVE NECESSARY...{:?}=={:?}", raw_ptr_from, raw_ptr_dest);
                 return Ok(()) // no move necessary - same objects
             }
         }
@@ -306,8 +306,8 @@ impl<'b, C: Component> ColumnInner<C> {
             .ok_or(DbError::ColumnTypeDiscrepancy)?
             .borrow_column_mut();
 
-        println!("\tDYNAMIC MOVE");
-        println!("\tLENS: {}, {}", from.len(), dest.len());
+        //println!("\tDYNAMIC MOVE");
+        //println!("\tLENS: {}, {}", from.len(), dest.len());
 
         debug_assert!(from.len() > from_index);
         debug_assert!(dest.len() > dest_index);
@@ -315,7 +315,7 @@ impl<'b, C: Component> ColumnInner<C> {
         dest[dest_index] = from[from_index].clone();
         //dest.insert(dest_index, from[from_index].clone());
 
-        println!("SETTING SOURCE TO DEFAULT");
+        //println!("SETTING SOURCE TO DEFAULT");
         from[from_index] = Default::default();
 
         Ok(())
