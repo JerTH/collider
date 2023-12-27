@@ -124,7 +124,7 @@ where
 
         self.resolve_edges()
     }
-
+    
     /// Create edges where nodes have exclusive dependencies which conflict
     /// with other nodes dependencies or exclusive dependencies
     fn resolve_edges(&mut self) {

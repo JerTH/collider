@@ -7,7 +7,7 @@ use std::{
 };
 
 use crate::{
-    borrowed::{BorrowError, BorrowRef, BorrowRefMut, BorrowSentinel, BorrowRefEither},
+    borrowed::{BorrowError, BorrowRef, BorrowRefMut, BorrowSentinel, RawBorrow},
     database::{
         reckoning::{AnyPtr, DbError, Family},
         Component, ComponentType,
@@ -98,8 +98,9 @@ pub struct ColumnHeader {
     pub tyid: StableTypeId,
     pub fn_constructor: fn() -> AnyPtr,
     pub fn_instance: fn(&AnyPtr, usize),
-    pub fn_move: fn(&AnyPtr, &AnyPtr, usize, usize) -> Result<(), DbError>,
+    pub fn_move: fn(&AnyPtr, &AnyPtr, usize) -> Result<(usize, usize), DbError>,
     pub fn_resize: fn(&AnyPtr, usize) -> Result<usize, DbError>,
+    pub fn_swap_and_destroy: fn(&AnyPtr, usize) -> Option<usize>,
     pub(crate) fn_debug: fn(&AnyPtr, &mut std::fmt::Formatter<'_>) -> std::fmt::Result,
 }
 
@@ -114,29 +115,31 @@ impl ColumnHeader {
 pub struct Column {
     pub header: ColumnHeader, // Meta-data and function ptrs
     pub data: AnyPtr,       // ColumnInner<T>
+    pub entitym: Vec<EntityId>,
 }
 
+/// Used to break apart a run-time tracked borrow into its component parts (an atomic borrow and a pointer)
 pub trait BorrowAsRawParts {
-    unsafe fn borrow_as_raw_parts(self) -> (BorrowRefEither, NonNull<std::os::raw::c_void>);
+    unsafe fn borrow_as_raw_parts(self) -> (RawBorrow, NonNull<std::os::raw::c_void>);
 }
 
 impl<C: Component> BorrowAsRawParts for ColumnRef<C> {
-    unsafe fn borrow_as_raw_parts(self) -> (BorrowRefEither, NonNull<std::os::raw::c_void>) {
+    unsafe fn borrow_as_raw_parts(self) -> (RawBorrow, NonNull<std::os::raw::c_void>) {
         let ptr = self.pointer.as_ptr() as *mut std::os::raw::c_void;
         let non_null = NonNull::new(ptr)
             .expect("expeceted non-null pointer");
 
-        (BorrowRefEither::Immutable(self.borrow), non_null)
+        (RawBorrow::Immutable(self.borrow), non_null)
     }
 }
 
 impl<C: Component> BorrowAsRawParts for ColumnRefMut<C> {
-    unsafe fn borrow_as_raw_parts(self) -> (BorrowRefEither, NonNull<std::os::raw::c_void>) {
+    unsafe fn borrow_as_raw_parts(self) -> (RawBorrow, NonNull<std::os::raw::c_void>) {
         let ptr = self.pointer.as_ptr() as *mut std::os::raw::c_void;
         let non_null = NonNull::new(ptr)
             .expect("expeceted non-null pointer");
         
-        (BorrowRefEither::Mutable(self.borrow), non_null)
+        (RawBorrow::Mutable(self.borrow), non_null)
     }
 }
 
@@ -167,48 +170,78 @@ impl<C: Component> BorrowColumnAs<C, ColumnRefMut<C>> for Column {
 
 impl<'b> Column {
     pub fn new(header: ColumnHeader, data: AnyPtr) -> Column {
-        Column { header, data }
+        Column { header, data, entitym: Default::default() }
+    }
+
+    fn len(&self) -> usize {
+        self.entitym.len()
     }
 
     /// Instantiate a component instance at the specified index
     /// This function doesn't actually really care about the data
     /// stored at a given index, it just cares that the memory at
     /// the provided index is initialized
-    pub fn instantiate_at(&self, index: usize) -> Result<(), DbError> {
+    pub(crate) fn instantiate_at(&self, index: usize) -> Result<(), DbError> {
         let minimum_size = index + 1;
         (self.header.fn_resize)(&self.data, minimum_size).map(|_| ())
     }
 
-    pub fn instantiate_with<C: Component>(&self, index: usize, component: C) -> Result<(), DbError> {
+    pub(crate) fn instantiate_with<C: Component>(&self, index: usize, component: C) -> Result<(), DbError> {
         self.instantiate_at(index)?;
+        self.get_mut()[index] = component;
 
-        let column = self.data
-            .downcast_ref::<ColumnInner<C>>()
-            .expect("instantiate_with: expected matching column types");
-        let mut column_ref = column.borrow_column_mut();
-        column_ref[index] = component;
         Ok(())
     }
     
     pub(crate) fn get_ref<C: Component>(&'b self) -> ColumnRef<C> {
-        //println!("Column::get_ref -> TypeId:       {:?}", (&*self.data).type_id());
+        ColumnInner::<C>::downcast_and_borrow(&self.data).expect("expected matching column types")
+    }
 
-        let inner = self
-            .data
-            .downcast_ref::<ColumnInner<C>>()
-            .expect("get_ref: expected matching column types");
-        
-        inner.borrow_column()
+    pub(crate) fn get_mut<C: Component>(&'b self) -> ColumnRefMut<C> {
+        ColumnInner::<C>::downcast_and_borrow_mut(&self.data).expect("expected matching column types")
+    }
+    
+    /// Destroys an entity by swapping it to the end of the column and then popping it
+    /// Returns the [EntityId] of the *swapped* entity, and the new length of this column if successful
+    pub(crate) fn swap_and_destroy(&mut self, index: usize) -> Option<(EntityId, usize)> {
+        if let Some(new_len) = (self.header.fn_swap_and_destroy)(&self.data, index) {
+            let _killed = self.entitym.swap_remove(index);
+            let swapped = unsafe { *self.entitym.get_unchecked(index) };
+            return Some((swapped, new_len));
+        } else {
+            return None;
+        }
+    }
+
+    /// Moves an entity from the given index of this [Column] to the end of `dest` [Column]
+    /// Returns the [EntityId] of the *swapped* entity, and the new length of the `dest` column if successful
+    pub(crate) fn move_component_to(&mut self, dest: &mut Self, index: usize) -> Option<MoveComponentResult> {
+        if let Ok((from_len, dest_len)) = (self.header.fn_move)(&self.data, &dest.data, index) {
+            //dest.push(from.swap_remove(from_index));
+            dest.entitym.push(self.entitym.swap_remove(index));
+
+            let swapped = unsafe { *self.entitym.get_unchecked(index) };
+            let moved = *dest.entitym.last().expect("expected just moved component");
+
+            return Some(MoveComponentResult {
+                moved,
+                swapped,
+                new_from_len: self.len(),
+                new_dest_len: dest.len(),
+            });
+
+        } else {
+            return None;
+        }
     }
 }
 
-impl Display for Column {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Column\n[\n")?;
-        write!(f, "{:#?}", self.header)?;
-        (self.header.fn_debug)(&self.data, f)?;
-        write!(f, "]\n")
-    }
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
+pub(crate) struct MoveComponentResult {
+    pub(crate) moved: EntityId,
+    pub(crate) swapped: EntityId,
+    pub(crate) new_from_len: usize,
+    pub(crate) new_dest_len: usize,
 }
 
 /// The actual raw data storage for the users data
@@ -219,8 +252,8 @@ pub(crate) struct ColumnInner<C: Component> {
     /// For an entity in a table, its associated components must
     /// always occupy the same index in each column. Failure to
     /// uphold this invariant will result in undefined behavior
-    pub(crate) values: UnsafeCell<Vec<C>>,
     pub(crate) borrow: BorrowSentinel,
+    pub(crate) values: UnsafeCell<Vec<C>>,
 }
 
 impl<C: Component> ColumnInner<C> {
@@ -278,53 +311,82 @@ impl<'b, C: Component> ColumnInner<C> {
         (column as &dyn Display).fmt(f)
     }
 
-    /// Moves a single component from one [Column] to another, if they are the same type
-    pub fn dynamic_move(
+    fn is_same_column(from_ptr: &AnyPtr, dest_ptr: &AnyPtr) -> bool {
+        let raw_ptr_from: *const dyn Any = from_ptr.as_ref();
+        let raw_ptr_dest: *const dyn Any = dest_ptr.as_ref();
+        raw_ptr_from == raw_ptr_dest
+    }
+
+    fn downcast_and_borrow(column: &AnyPtr) -> Result<ColumnRef<C>, DbError> {
+        Ok(column
+            .downcast_ref::<ColumnInner<C>>()
+            .ok_or(DbError::ColumnTypeDiscrepancy)?
+            .borrow_column())
+    }
+
+    fn downcast_and_borrow_mut(column: &AnyPtr) -> Result<ColumnRefMut<C>, DbError> {
+        Ok(column
+            .downcast_ref::<ColumnInner<C>>()
+            .ok_or(DbError::ColumnTypeDiscrepancy)?
+            .borrow_column_mut())
+    }
+
+    /// Moves a single component from one [Column] to another, if they are the same type,
+    /// leaving an empty space in the source column
+    //pub fn dynamic_move(
+    //    from_ptr: &AnyPtr,
+    //    dest_ptr: &AnyPtr,
+    //    from_index: usize,
+    //    dest_index: usize,
+    //) -> Result<(), DbError> {
+    //    if ColumnInner::<C>::is_same_column(from_ptr, dest_ptr) { return Ok(()) }
+    //    
+    //    let mut from = ColumnInner::<C>::downcast_and_borrow_mut(from_ptr)?;
+    //    let mut dest = ColumnInner::<C>::downcast_and_borrow_mut(dest_ptr)?;
+//
+    //    debug_assert!(from.len() > from_index);
+    //    debug_assert!(dest.len() > dest_index);
+//
+    //    dest[dest_index] = from[from_index].clone();
+    //    from[from_index] = Default::default();
+//
+    //    Ok(())
+    //}
+    
+    /// Moves a single component from the given index in `from` [Column] to the end of
+    /// `dest` column. Maintains compaction of both columns by swapping the last
+    /// element of the source column into the newly free space
+    pub fn dynamic_pop_and_move(
         from_ptr: &AnyPtr,
         dest_ptr: &AnyPtr,
         from_index: usize,
-        dest_index: usize,
-    ) -> Result<(), DbError> {
-
-        //println!("DYNAMIC MOVE");
-        { // guard scope
-            let raw_ptr_from: *const dyn Any = from_ptr.as_ref();
-            let raw_ptr_dest: *const dyn Any = dest_ptr.as_ref();
-            if raw_ptr_from == raw_ptr_dest {
-                //println!("\tNO MOVE NECESSARY...{:?}=={:?}", raw_ptr_from, raw_ptr_dest);
-                return Ok(()) // no move necessary - same objects
-            }
-        }
+    ) -> Result<(usize, usize), DbError> {
+        if ColumnInner::<C>::is_same_column(from_ptr, dest_ptr) { return Err(DbError::MoveWithSameColumn) }
         
-        let mut from = from_ptr
-            .downcast_ref::<ColumnInner<C>>()
-            .ok_or(DbError::ColumnTypeDiscrepancy)?
-            .borrow_column_mut();
-
-        let mut dest = dest_ptr
-            .downcast_ref::<ColumnInner<C>>()
-            .ok_or(DbError::ColumnTypeDiscrepancy)?
-            .borrow_column_mut();
-
-        //println!("\tDYNAMIC MOVE");
-        //println!("\tLENS: {}, {}", from.len(), dest.len());
-
+        let mut from = ColumnInner::<C>::downcast_and_borrow_mut(from_ptr)?;
+        let mut dest = ColumnInner::<C>::downcast_and_borrow_mut(dest_ptr)?;
+        
         debug_assert!(from.len() > from_index);
-        debug_assert!(dest.len() > dest_index);
+        dest.push(from.swap_remove(from_index));
 
-        dest[dest_index] = from[from_index].clone();
-        //dest.insert(dest_index, from[from_index].clone());
-
-        //println!("SETTING SOURCE TO DEFAULT");
-        from[from_index] = Default::default();
-
-        Ok(())
+        Ok((from.len(), dest.len()))
     }
-
+    
     /// Resizes the column to hold at least [min_size] components
     pub fn dynamic_resize(column: &AnyPtr, min_size: usize) -> Result<usize, DbError> {
-        let column: &ColumnInner<C> = ColumnInner::downcast_column(column);
-        column.resize_minimum(min_size)
+        let inner: &ColumnInner<C> = ColumnInner::downcast_column(column);
+        inner.resize_minimum(min_size)
+    }
+
+    pub fn dynamic_swap_and_destroy(column: &AnyPtr, index: usize) -> Option<usize> {
+        let mut column_ref: ColumnRefMut<C> = ColumnInner::downcast_column(column).borrow_column_mut();
+        
+        if column_ref.len() < index {
+            return None;
+        }
+
+        let _ = column_ref.swap_remove(index);
+        Some(column_ref.len())
     }
 
     /// Constructs a [Column] and returns a type erased pointer to it
@@ -351,5 +413,17 @@ impl<'b, C: Component> ColumnInner<C> {
         debug_assert!(column.len() >= min_size);
 
         Ok(column.len())
+    }
+}
+
+
+// Display impl
+
+impl Display for Column {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Column\n[\n")?;
+        write!(f, "{:#?}", self.header)?;
+        (self.header.fn_debug)(&self.data, f)?;
+        write!(f, "]\n")
     }
 }

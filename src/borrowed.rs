@@ -150,7 +150,7 @@ impl<'b> Drop for BorrowRefMut {
     }
 }
 
-pub enum BorrowRefEither {
+pub enum RawBorrow {
     Immutable(BorrowRef),
     Mutable(BorrowRefMut),
 }

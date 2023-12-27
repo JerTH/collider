@@ -10,6 +10,7 @@ pub mod reckoning {
     use std::fmt::Display;
     use std::hash::Hash;
 
+    use std::ops::Deref;
     // sync
     use std::sync::atomic::AtomicU32;
     use std::sync::atomic::Ordering;
@@ -489,6 +490,7 @@ pub mod reckoning {
         UnableToAcquireTablesLock(String),
         FamilyDoesntExist(FamilyId),
         UnableToAcquireLock,
+        MoveWithSameColumn,
     }
 
     impl Error for DbError {}
@@ -542,6 +544,9 @@ pub mod reckoning {
                 DbError::UnableToAcquireLock => {
                     write!(f, "failed to acquire poisoned lock")
                 }
+                DbError::MoveWithSameColumn => {
+                    write!(f, "attempted to move a component to the column it was already in")
+                }
             }
         }
     }
@@ -564,8 +569,9 @@ pub mod reckoning {
         /// types of columns we've already built
         headers: Arc<DashMap<ComponentType, ColumnHeader>>,
     }
-
     pub(crate) type ColumnMapRef<'db> = dashmap::mapref::one::Ref<'db, ColumnKey, Column>;
+    pub(crate) type ColumnMapRefMut<'db> = dashmap::mapref::one::RefMut<'db, ColumnKey, Column>;
+
     pub(crate) type TableMapRef<'db> = dashmap::mapref::one::Ref<'db, FamilyId, Table>;
 
     impl EntityDatabase {
@@ -584,7 +590,7 @@ pub mod reckoning {
 
             // setup the unit/null component family
             let unit_family_set = ComponentTypeSet::from([ComponentType::of::<()>()]);
-            let family_id = db
+            let _ = db
                 .new_family(unit_family_set)
                 .expect("please report this bug - unable to create unit component family");
             db
@@ -592,6 +598,10 @@ pub mod reckoning {
 
         pub(crate) fn get_column(&self, key: &ColumnKey) -> Option<ColumnMapRef> {
             self.columns.get(key)
+        }
+
+        pub(crate) fn get_column_mut(&self, key: &ColumnKey) -> Option<ColumnMapRefMut> {
+            self.columns.get_mut(key)
         }
 
         pub(crate) fn get_table(&self, family: &FamilyId) -> Option<TableMapRef> {
@@ -604,7 +614,6 @@ pub mod reckoning {
             value: &'db V,
         ) -> Result<(), DbError>
         where
-            //(K, V): GetDbMap<'db, (K, V)>,
             DbMaps: GetDbMap<'db, (K, V)>,
         {
             let mut guard = self
@@ -613,6 +622,22 @@ pub mod reckoning {
                 .ok_or(DbError::FailedToAcquireMapping)?;
 
             guard.insert(key.clone(), value.clone());
+            Ok(())
+        }
+
+        pub fn delete_mapping<'db, K: Clone + Eq + Hash + 'db, V: Clone + 'db>(
+            &'db self,
+            key: &'db K,
+        ) -> Result<(), DbError>
+        where
+            DbMaps: GetDbMap<'db, (K, V)>,
+        {
+            let mut guard = self
+                .maps
+                .mut_map::<(K, V)>()
+                .ok_or(DbError::FailedToAcquireMapping)?;
+
+            guard.remove(key);
             Ok(())
         }
 
@@ -643,6 +668,47 @@ pub mod reckoning {
             Ok(entity)
         }
 
+        /// Destroys an entity, deleting its components and associated data
+        pub fn destroy(&self, entity: EntityId) -> Result<(), DbError> {
+            // columns must swap and pop to remain compact
+            // affected table must correct its entity map
+            
+            let family = self.query_mapping(&entity).ok_or(DbError::EntityDoesntExist(entity))?;
+            let table = self
+                .tables
+                .get_mut(&family)
+                .ok_or(DbError::TableDoesntExistForFamily(family))?;
+
+            let index = *table
+                .entity_map()
+                .get(&entity)
+                .ok_or(DbError::EntityNotInTable(entity, family))?;
+
+            let mut swap_result: Option<(EntityId, usize)> = None;
+
+            for (_, key) in table.column_map() {
+                let mut column = self.get_column_mut(key)
+                    .ok_or(DbError::ColumnDoesntExistInTable)?;
+                
+                // This should be the same for each column
+                // If it's not, then this tables columns are corrupted
+                if swap_result.is_some() {
+                    assert!(swap_result == column.swap_and_destroy(index));
+                } else {
+                    swap_result = column.swap_and_destroy(index);
+                    assert!(swap_result.is_some())
+                }
+            }
+            
+            let (swapped, _) = swap_result.expect("expected swap result");
+
+            table.entity_map().entry(swapped).and_modify(|i| *i = index);
+
+            self.delete_mapping::<EntityId, FamilyId>(&entity)?;
+            
+            Ok(())
+        }
+
         fn initialize_row_in(
             &self,
             entity: &EntityId,
@@ -660,7 +726,6 @@ pub mod reckoning {
                     column.instantiate_at(index)?;
                 } else {
                     if let Some(header) = self.headers.get(ty) {
-                        //println!("BUILDING COLUMN DURING ROW INIT");
                         let column_header = header.clone();
                         let component_type = ComponentType::from(column_header.stable_type_id());
                         let column_key = ColumnKey::from((*table.family_id(), component_type));
@@ -668,7 +733,7 @@ pub mod reckoning {
                         let column = Column::new(column_header.clone(), column_inner);
                         self.columns.insert(column_key, column);
                     } else {
-                        todo!("lazy init columns");
+                        unimplemented!("lazy init columns");
                     }
                 }
             }
@@ -865,15 +930,12 @@ pub mod reckoning {
                 .mut_map::<(ComponentTypeSet, FamilyIdSet)>()
                 .ok_or(DbError::FailedToAcquireMapping)?;
 
-            let mut total_powerset = 0;
             for subset in components.power_set() {
                 guard
                     .entry(subset)
                     .and_modify(|set| set.insert(family_id))
                     .or_insert(FamilyIdSet::from(&[family_id]));
-                total_powerset += 1;
             }
-            //println!("GENERATED {} SUBSETS", total_powerset);
 
             drop(guard);
 
@@ -946,41 +1008,49 @@ pub mod reckoning {
                 .get(entity)
                 .ok_or(DbError::EntityNotInTable(*entity, *from_family))?;
 
-            let dest_index = *dest_table
-                .entity_map()
-                .get(entity)
-                .ok_or(DbError::EntityNotInTable(*entity, *dest_family))?;
+            //let dest_index = *dest_table
+            //    .entity_map()
+            //    .get(entity)
+            //    .ok_or(DbError::EntityNotInTable(*entity, *dest_family))?;
 
-            let mut result = Ok(());
-            //println!("FROM TABLE COLUMN MAP: {:?}", from_table.column_map());
-            //println!("DEST TABLE COLUMN MAP: {:?}", dest_table.column_map());
-
+            let mut move_result = None;
+            
             from_table.column_map().iter().for_each(|(ty, from_key)| {
-                let from_col = self.columns.get(from_key);
+                let from_col = self.get_column_mut(from_key);
                 let dest_col = dest_table
                     .column_map()
                     .get(ty)
-                    .and_then(|key| self.columns.get(key));
+                    .and_then(|key| self.get_column_mut(key));
 
                 match (from_col, dest_col) {
                     (None, None) => {
-                        todo!()
+                        unimplemented!()
                     }
-                    (None, Some(dest)) => {
-                        todo!()
+                    (None, Some(_)) => {
+                        unimplemented!()
                     }
-                    (Some(from), None) => {
-                        todo!()
+                    (Some(_), None) => {
+                        unimplemented!()
                     }
-                    (Some(from), Some(dest)) => {
-                        //println!("\tMOVE COMPONENTS {}, {}", from_index, dest_index);
-                        result = (from.header.fn_move)(
-                            &from.data, &dest.data, from_index, dest_index,
-                        );
+                    (Some(mut from), Some(mut dest)) => {
+                        move_result = from.move_component_to(&mut dest, from_index);
                     }
                 }
             });
-            result
+
+            let move_result = move_result.expect("expected move component result");
+
+            let swapped = move_result.swapped;
+            let moved = move_result.moved;
+            let dest_len = move_result.new_dest_len;
+
+            from_table.entity_map().insert(swapped, from_index);
+            from_table.entity_map().remove(&moved);
+            dest_table.entity_map().insert(moved, dest_len - 1);
+
+            self.update_mapping(&moved, dest_family)?;
+
+            Ok(())
         }
 
         /// Transfers an entity out of its current family into the provided family, copying all component data
@@ -1058,8 +1128,9 @@ pub mod reckoning {
                         tyid: component_type.inner(),
                         fn_constructor: ColumnInner::<C>::dynamic_ctor,
                         fn_instance: ColumnInner::<C>::dynamic_instance,
-                        fn_move: ColumnInner::<C>::dynamic_move,
+                        fn_move: ColumnInner::<C>::dynamic_pop_and_move,
                         fn_resize: ColumnInner::<C>::dynamic_resize,
+                        fn_swap_and_destroy: ColumnInner::<C>::dynamic_swap_and_destroy,
                         fn_debug: ColumnInner::<C>::dynamic_debug,
                     };
 
@@ -1189,7 +1260,6 @@ pub mod reckoning {
     /// selections of data in an [super::EntityDatabase]
     #[macro_use]
     pub mod macros {
-        use crate::column::BorrowColumnAs;
 
         #[macro_export]
         macro_rules! impl_transformations {
@@ -1218,7 +1288,7 @@ pub mod reckoning {
                                     // Here we take a reference to our borrow and an opaque pointer to the column we're interested in
                                     // and through various type system gymnastics we transform the pointer into an accessor with the
                                     // correct mutablity, try to get a component from the column, and check for out of bounds
-                                    let (_, pointer): &(crate::borrowed::BorrowRefEither, std::ptr::NonNull<std::os::raw::c_void>) = self.borrows.get_unchecked(self.table_index + $i);
+                                    let (_, pointer): &(crate::borrowed::RawBorrow, std::ptr::NonNull<std::os::raw::c_void>) = self.borrows.get_unchecked(self.table_index + $i);
                                     let casted: std::ptr::NonNull<Vec<$t::Type>> = pointer.cast::<Vec<$t::Type>>();
                                     let raw: *mut Vec<$t::Type> = casted.as_ptr();
                                     if let Some(result) = <*mut Vec<$t::Type> as GetAsRefType<'db, $t, <$t as SelectOne<'db>>::Ref>>::get_as_ref_type(&raw, self.column_index) {

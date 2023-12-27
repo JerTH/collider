@@ -4,6 +4,8 @@ use std::{
     sync::RwLock,
 };
 
+use dashmap::DashMap;
+
 use crate::{
     column::ColumnKey,
     database::{
@@ -24,7 +26,7 @@ pub struct Table {
     /// Maps entity ID's to their real index value
     /// This can/should be improved in the future - entity id's have
     /// ability to store indexing information intrinsically
-    entity_map: HashMap<EntityId, usize>,
+    entity_map: DashMap<EntityId, usize>,
 
     /// Free list of indicies, the free list is populated whenever
     /// an entity is destroyed or moved out of the table
@@ -38,7 +40,7 @@ impl Table {
             family,
             components,
             columns: HashMap::new(),
-            entity_map: HashMap::new(),
+            entity_map: DashMap::new(),
             free: RwLock::new(Vec::new()),
         }
     }
@@ -47,16 +49,16 @@ impl Table {
     pub fn family_id(&self) -> &FamilyId {
         &self.family
     }
-
-    pub fn free_count(&self) -> usize {
-        self.free
-            .read()
-            .expect("unable to read table free list")
-            .len()
-    }
+    
+    //pub fn free_count(&self) -> usize {
+    //    self.free
+    //        .read()
+    //        .expect("unable to read table free list")
+    //        .len()
+    //}
 
     /// Returns a reference to the entity map of this [`Table`].
-    pub fn entity_map(&self) -> &HashMap<EntityId, usize> {
+    pub fn entity_map(&self) -> &DashMap<EntityId, usize> {
         &self.entity_map
     }
 
@@ -71,15 +73,15 @@ impl Table {
     }
     
     pub fn remove_entity(&mut self, entity: &EntityId) -> Result<EntityId, DbError> {
-        let index = *self
-            .entity_map
-            .get(entity)
-            .ok_or(DbError::EntityNotInTable(*entity, self.family))?;
-
-        self.free
-            .write()
-            .expect("unable to lock table free list for writes")
-            .push(index);
+        //let index = *self
+        //    .entity_map
+        //    .get(entity)
+        //    .ok_or(DbError::EntityNotInTable(*entity, self.family))?;
+        //
+        //self.free
+        //    .write()
+        //    .expect("unable to lock table free list for writes")
+        //    .push(index);
 
         self.entity_map
             .remove(entity)
@@ -87,22 +89,24 @@ impl Table {
 
         Ok(*entity)
     }
-
+    
     /// Gets the index of the next free row in the table
     /// expanding the table if necessary
     pub fn get_next_free_row(&self) -> usize {
         // Do we already have a next free row?
-        if let Some(free) = self
-            .free
-            .write()
-            .expect("unable to write table free list")
-            .pop()
-        {
-            //println!("HAS INDEX FROM FREE LIST: {}", free);
-            return free;
-        } else {
-            return self.entity_map.len();
-        }
+        return self.entity_map().len();
+
+        //if let Some(free) = self
+        //    .free
+        //    .write()
+        //    .expect("unable to write table free list")
+        //    .pop()
+        //{
+        //    //println!("HAS INDEX FROM FREE LIST: {}", free);
+        //    return free;
+        //} else {
+        //    return self.entity_map.len();
+        //}
     }
     
     pub fn insert_new_entity(&mut self, entity: &EntityId) -> Result<usize, DbError> {
@@ -113,10 +117,10 @@ impl Table {
 
     pub fn get_or_insert_entity(&mut self, entity: &EntityId) -> Result<usize, DbError> {
         if let Some(index) = self.entity_map().get(entity) {
-            Ok(*index)
-        } else {
-            self.insert_new_entity(entity)
+            return Ok(*index)
         }
+        
+        self.insert_new_entity(entity)
     }
 
     pub fn update_column_map(&mut self, component_type: ComponentType, column_key: ColumnKey) {
@@ -140,7 +144,7 @@ impl Display for Table {
         )?;
         write!(f, "entity_map:\n")?;
         for item in self.entity_map() {
-            write!(f, " ({} : {})\n", item.0, item.1)?;
+            write!(f, " ({} : {})\n", item.key(), item.value())?;
         }
         write!(f, "\n")
     }

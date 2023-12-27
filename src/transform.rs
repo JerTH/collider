@@ -4,7 +4,7 @@
 //! [crate::database::reckoning::EntityDatabase]
 
 use crate::borrowed::BorrowRef;
-use crate::borrowed::BorrowRefEither;
+use crate::borrowed::RawBorrow;
 use crate::column;
 use crate::column::Column;
 use crate::column::ColumnKey;
@@ -38,7 +38,7 @@ impl<'db> Phase<'db> {
             subphases: Vec::new(),
         }
     }
-    
+
     pub fn add_transformation<T>(&mut self, tr: T)
     where
         T: Transformation,
@@ -234,7 +234,7 @@ pub struct RowIter<'db, RTuple> {
 
     /// Table-wise list of columns to iterate through
     pub(crate) keys: Vec<ColumnKey>,
-    pub(crate) borrows: Vec<(BorrowRefEither, NonNull<c_void>)>,
+    pub(crate) borrows: Vec<(RawBorrow, NonNull<c_void>)>,
 
     pub(crate) width: usize,
     pub(crate) table_index: usize,
