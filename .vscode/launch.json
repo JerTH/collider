@@ -1,0 +1,65 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'collider'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=collider"
+                ],
+                "filter": {
+                    "name": "collider",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug integration test 'example_rocket_launch'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--test=example_rocket_launch",
+                    "--package=collider"
+                ],
+                "filter": {
+                    "name": "example_rocket_launch",
+                    "kind": "test"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug integration test 'example_vehicle_race'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--test=example_vehicle_race",
+                    "--package=collider"
+                ],
+                "filter": {
+                    "name": "example_vehicle_race",
+                    "kind": "test"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}

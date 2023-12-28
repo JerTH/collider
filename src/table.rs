@@ -72,7 +72,7 @@ impl Table {
         &self.components
     }
     
-    pub fn remove_entity(&mut self, entity: &EntityId) -> Result<EntityId, DbError> {
+    pub fn remove_entity(&mut self, entity: &EntityId) -> Result<(), DbError> {
         //let index = *self
         //    .entity_map
         //    .get(entity)
@@ -83,11 +83,13 @@ impl Table {
         //    .expect("unable to lock table free list for writes")
         //    .push(index);
 
-        self.entity_map
-            .remove(entity)
-            .expect("expected entity map to contain this value because of previous access");
+        self.entity_map.remove(entity);
 
-        Ok(*entity)
+        //self.entity_map
+        //    .remove(entity)
+        //    .expect("expected entity map to contain this value because of previous access");
+
+        Ok(())
     }
     
     /// Gets the index of the next free row in the table
@@ -115,17 +117,31 @@ impl Table {
         Ok(index)
     }
 
-    pub fn get_or_insert_entity(&mut self, entity: &EntityId) -> Result<usize, DbError> {
+    pub(crate) fn get_or_insert_entity(&mut self, entity: &EntityId) -> TableResult<DbError> {
         if let Some(index) = self.entity_map().get(entity) {
-            return Ok(*index)
+            return TableResult::EntityAlreadyExists(*index)
         }
-        
-        self.insert_new_entity(entity)
+
+        match self.insert_new_entity(entity) {
+            Ok(index) => {
+                return TableResult::EntityInserted(index)
+            },
+            Err(e) => {
+                return TableResult::Error(e)
+            },
+        }
     }
 
     pub fn update_column_map(&mut self, component_type: ComponentType, column_key: ColumnKey) {
         self.columns.insert(component_type, column_key);
     }
+}
+
+#[derive(Debug)]
+pub(crate) enum TableResult<E> {
+    EntityAlreadyExists(usize),
+    EntityInserted(usize),
+    Error(E),
 }
 
 impl Display for Table {

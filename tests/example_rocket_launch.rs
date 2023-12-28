@@ -7,6 +7,8 @@ use collider::{*, database::{EntityDatabase, Component}, transform::{Transformat
 
 #[test]
 pub fn rocket_launch() {
+    std::env::set_var("RUST_BACKTRACE", "1");
+
     let mut db = EntityDatabase::new();
     
     let mission_control = db.create().unwrap();
@@ -32,6 +34,8 @@ pub fn rocket_launch() {
         loops += 1;
         simulation.run_on(&db).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(250));
+        
+        println!("{}", db);
 
         if loops > 100 {
             break;
@@ -149,8 +153,8 @@ impl Transformation for PhysicsSystem {
 
     fn run(data: transform::Rows<Self::Data>) -> transform::TransformationResult {
         for (physics,) in data {
-            println!("nF: {}, nM: {}", physics.net_force, physics.net_mass);
-            println!("A: {}, V: {}, At: {}", physics.acceleration, physics.velocity, physics.altitude);
+            println!("/nF: {}, nM: {}", physics.net_force, physics.net_mass);
+            println!("\\A: {}, V: {}, At: {}", physics.acceleration, physics.velocity, physics.altitude);
 
             physics.acceleration = physics.net_force / physics.net_mass;
             physics.velocity = f64::max(0.0, physics.velocity + physics.acceleration);

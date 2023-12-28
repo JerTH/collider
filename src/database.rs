@@ -4,6 +4,7 @@ pub mod reckoning {
     use core::fmt;
     // misc
     use std::any::Any;
+    use std::any::type_name;
     use std::collections::HashSet;
     use std::error::Error;
     use std::fmt::Debug;
@@ -31,6 +32,8 @@ pub mod reckoning {
     use crate::column::ColumnInner;
     use crate::column::ColumnKey;
     use crate::column::BorrowColumnAs;
+    use crate::column::ColumnMoveResult;
+    use crate::column::ColumnSwapRemoveResult;
     use crate::id::*;
     use crate::table::*;
     use crate::EntityId;
@@ -255,7 +258,7 @@ pub mod reckoning {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             let full_name = self.0.name().unwrap_or("{unknown}");
             let split_str = full_name.rsplit_once("::");
-            let substring = split_str.unwrap_or((full_name, full_name)).0;
+            let substring = split_str.unwrap_or((full_name, full_name)).1;
             write!(f, "{}", substring)
         }
     }
@@ -665,14 +668,14 @@ pub mod reckoning {
             // add the entity to the unit/null family
             self.update_mapping(&entity, &family)?;
             self.initialize_row_in(&entity, &family)?;
+            
             Ok(entity)
         }
 
         /// Destroys an entity, deleting its components and associated data
         pub fn destroy(&self, entity: EntityId) -> Result<(), DbError> {
-            // columns must swap and pop to remain compact
-            // affected table must correct its entity map
-            
+            todo!();
+
             let family = self.query_mapping(&entity).ok_or(DbError::EntityDoesntExist(entity))?;
             let table = self
                 .tables
@@ -684,7 +687,7 @@ pub mod reckoning {
                 .get(&entity)
                 .ok_or(DbError::EntityNotInTable(entity, family))?;
 
-            let mut swap_result: Option<(EntityId, usize)> = None;
+            let mut swap_result: Option<ColumnSwapRemoveResult> = None;
 
             for (_, key) in table.column_map() {
                 let mut column = self.get_column_mut(key)
@@ -693,22 +696,53 @@ pub mod reckoning {
                 // This should be the same for each column
                 // If it's not, then this tables columns are corrupted
                 if swap_result.is_some() {
-                    assert!(swap_result == column.swap_and_destroy(index));
+                    let unwrapped = swap_result.as_ref().expect("expected swap result");
+                    assert!(*unwrapped == column.swap_and_destroy(index));
                 } else {
-                    swap_result = column.swap_and_destroy(index);
-                    assert!(swap_result.is_some())
+                    swap_result = Some(column.swap_and_destroy(index));
                 }
             }
-            
-            let (swapped, _) = swap_result.expect("expected swap result");
 
-            table.entity_map().entry(swapped).and_modify(|i| *i = index);
+            if let Some(swap_result) = swap_result {
+                let moved = swap_result.moved;
+                let moved_index = swap_result.new_moved_index;
 
-            self.delete_mapping::<EntityId, FamilyId>(&entity)?;
-            
+                table.entity_map().entry(moved).and_modify(|i| *i = moved_index);
+            } else {
+                // better error handling here plz
+                panic!()
+            }
+
+            self.delete_mapping::<EntityId, FamilyId>(&entity)?;            
             Ok(())
         }
 
+
+        
+        fn build_typed_column_for_family(&self, family: FamilyId, ty: &ComponentType) -> Result<dashmap::mapref::one::RefMut<'_, ColumnKey, Column>, DbError> {
+            if let Some(header) = self.headers.get(ty) {
+                let column_header = header.clone();
+                let component_type = ComponentType::from(column_header.stable_type_id());
+                let column_key = ColumnKey::from((family, component_type));
+                let column_inner = (column_header.fn_constructor)();
+                let column = Column::new(column_header.clone(), column_inner);
+                self.columns.insert(column_key, column);
+                
+                Ok(self.columns.get_mut(&column_key).expect("expect just-created column"))
+            } else {
+                unimplemented!("lazy init columns?");
+            }
+        }
+
+        
+
+        /// Initializes the component data for a given `entity` belonging to a given `family`
+        /// If the entity doesn't already exist in the table, this creates space for it
+        /// 
+        /// Returns the columnar index of the `entity`. Note, this index is never used to directly
+        /// index any entity in user code, instead, if access to a specific entity is required then
+        /// its associated [EntityId] must be used. The index returned here will change over time,
+        /// it's useful only to update the [EntityDatabase]'s present state
         fn initialize_row_in(
             &self,
             entity: &EntityId,
@@ -718,27 +752,30 @@ pub mod reckoning {
                 .tables
                 .get_mut(family)
                 .ok_or(DbError::TableDoesntExistForFamily(*family))?;
-
-            let index = table.get_or_insert_entity(entity)?;
-
-            for (ty, key) in table.column_map() {
-                if let Some(column) = self.columns.get(key) {
-                    column.instantiate_at(index)?;
-                } else {
-                    if let Some(header) = self.headers.get(ty) {
-                        let column_header = header.clone();
-                        let component_type = ComponentType::from(column_header.stable_type_id());
-                        let column_key = ColumnKey::from((*table.family_id(), component_type));
-                        let column_inner = (column_header.fn_constructor)();
-                        let column = Column::new(column_header.clone(), column_inner);
-                        self.columns.insert(column_key, column);
-                    } else {
-                        unimplemented!("lazy init columns");
+            
+            match table.get_or_insert_entity(entity) {
+                TableResult::EntityAlreadyExists(index) => {
+                    return Ok(index)
+                },
+                TableResult::EntityInserted(index) => {
+                    println!("ENTITY INSERTED ({:?})", entity);
+                    for (ty, key) in table.column_map() {
+                        if let Some(mut column) = self.columns.get_mut(key) {
+                            println!("\tINSTANCE IN EXISTING COLUMN ({})", ty);
+                            //assert_eq!(index, column.instance(entity)?);
+                        } else {
+                            println!("\tINSTANCE IN NEW COLUMN ({})", ty);
+                            let mut column = self.build_typed_column_for_family(*family, ty)?;
+                            //assert_eq!(index, column.instance(entity)?);
+                        }
                     }
-                }
+                    return Ok(index)
+                },
+                TableResult::Error(e) => {
+                    return Err(e)
+                },
             }
-
-            Ok(index)
+        
         }
 
         /// Adds a [Component] to an entity, moving it from one family to another
@@ -920,11 +957,12 @@ pub mod reckoning {
             });
             
             drop(guard); // release lock
-
+            
             // Here we map every unique subset of our component set to this family
             // This results in 2^n unique mappings. These mappings are used by queries
             // to string together all of the columns necessary for row iteration.
-            // In the future, we might want to intoduce a lazier mechanism for this.
+            // In the future, we might want to intoduce a lazier mechanism for this,
+            // or a way to trim unused mappings
             let mut guard = self
                 .maps
                 .mut_map::<(ComponentTypeSet, FamilyIdSet)>()
@@ -977,7 +1015,7 @@ pub mod reckoning {
             &self,
             entity: &EntityId,
             family: &FamilyId,
-        ) -> Result<EntityId, DbError> {
+        ) -> Result<(), DbError> {
             let mut table = self
                 .tables
                 .get_mut(family)
@@ -992,7 +1030,7 @@ pub mod reckoning {
             from_family: &FamilyId,
             dest_family: &FamilyId,
         ) -> Result<(), DbError> {
-            //println!("MOVING COMPONENTS...");
+            println!("MOVING COMPONENTS...");
             let from_table = self
                 .tables
                 .get(from_family)
@@ -1002,27 +1040,35 @@ pub mod reckoning {
                 .tables
                 .get(dest_family)
                 .ok_or(DbError::TableDoesntExistForFamily(*dest_family))?;
-
+            
             let from_index = *from_table
                 .entity_map()
                 .get(entity)
                 .ok_or(DbError::EntityNotInTable(*entity, *from_family))?;
 
-            //let dest_index = *dest_table
-            //    .entity_map()
-            //    .get(entity)
-            //    .ok_or(DbError::EntityNotInTable(*entity, *dest_family))?;
-
-            let mut move_result = None;
+            println!("FROM INDEX: {}", from_index);
             
-            from_table.column_map().iter().for_each(|(ty, from_key)| {
+            // assume the move will fail, update this if it succeeds
+            let mut move_result: Result<ColumnMoveResult, DbError> = Err(DbError::ColumnDoesntExistInTable);
+            
+            for (ty, from_key) in from_table.column_map().iter() {
+                println!("FROM TABLE LOOP");
                 let from_col = self.get_column_mut(from_key);
                 let dest_col = dest_table
                     .column_map()
                     .get(ty)
                     .and_then(|key| self.get_column_mut(key));
-
+                
                 match (from_col, dest_col) {
+                    (Some(mut from), Some(mut dest)) => {
+                        let pending_move_result = from.move_component_to(&mut dest, from_index);
+                        
+                        if move_result.is_ok() && pending_move_result.is_err() {
+                            panic!("data column state corrupted")
+                        } else {
+                            move_result = pending_move_result;
+                        }
+                    }
                     (None, None) => {
                         unimplemented!()
                     }
@@ -1032,25 +1078,33 @@ pub mod reckoning {
                     (Some(_), None) => {
                         unimplemented!()
                     }
-                    (Some(mut from), Some(mut dest)) => {
-                        move_result = from.move_component_to(&mut dest, from_index);
-                    }
                 }
-            });
+            }
+            
+            // if the move succeeded, patch the tables bookkeeping with the results of the move
+            match move_result {
+                Ok(ColumnMoveResult::SwapMoved { moved, new_moved_index, swapped, .. }) => {
+                    from_table.entity_map().insert(swapped, from_index);
+                    from_table.entity_map().remove(&moved);
+                    dest_table.entity_map().insert(moved, new_moved_index);
 
-            let move_result = move_result.expect("expected move component result");
-
-            let swapped = move_result.swapped;
-            let moved = move_result.moved;
-            let dest_len = move_result.new_dest_len;
-
-            from_table.entity_map().insert(swapped, from_index);
-            from_table.entity_map().remove(&moved);
-            dest_table.entity_map().insert(moved, dest_len - 1);
-
-            self.update_mapping(&moved, dest_family)?;
-
-            Ok(())
+                    self.update_mapping(&moved, dest_family)?;
+                    return Ok(())
+                },
+                Ok(ColumnMoveResult::Moved { moved, new_moved_index }) => {
+                    dest_table.entity_map().insert(moved, new_moved_index);
+                    from_table.entity_map().remove(&moved);
+                    
+                    self.update_mapping(&moved, dest_family)?;
+                    return Ok(())
+                },
+                Ok(ColumnMoveResult::NoMove) => {
+                    return Ok(())
+                },
+                Err(e) => {
+                    return Err(e)
+                },
+            }
         }
 
         /// Transfers an entity out of its current family into the provided family, copying all component data
@@ -1060,19 +1114,29 @@ pub mod reckoning {
             &self,
             entity: &EntityId,
             dest_family: &FamilyId,
-        ) -> Result<EntityId, DbError> {
+        ) -> Result<(), DbError> {
             let from_family: FamilyId = self
                 .query_mapping(entity)
                 .ok_or(DbError::EntityDoesntExist(*entity))?;
 
             self.initialize_row_in(entity, dest_family)?;
-            self.move_components(entity, &from_family, dest_family)?;
+
+            match self.move_components(entity, &from_family, dest_family) {
+                Ok(_) => {},
+                Err(DbError::ColumnDoesntExistInTable) => {
+                    /* this can happen if the from family doesnt have any columns */
+                },
+                Err(e) => {
+                    panic!("{:?}", e);
+                }
+            }
+
             self.update_mapping(entity, dest_family)?;
             self.remove_entity_from(entity, &from_family)
         }
 
         /// Explicitly sets a component for an entity. This is often the first time
-        /// a real component of a given type is created to an entity/family, and thus
+        /// a real component of a given type is created in an entity/family, and thus
         /// we may need to actually initialize the data column in the table we are
         /// trying to set data for
         fn set_component_for<C: Component>(
@@ -1080,6 +1144,8 @@ pub mod reckoning {
             entity: &EntityId,
             component: C,
         ) -> Result<(), DbError> {
+            println!("SET COMPONENT {} FOR {:?}", type_name::<C>(), entity);
+
             let family: FamilyId = self
                 .query_mapping(entity)
                 .ok_or(DbError::EntityDoesntExist(*entity))?;
@@ -1091,12 +1157,16 @@ pub mod reckoning {
                 .get(&family)
                 .ok_or(DbError::TableDoesntExistForFamily(family))?;
 
+            println!("TABLE HAS {} ENTITIES", table.entity_map().len());
+
             // here we get the index that the table is storing the entity in
             // we error out the table doesn't know about the entity
             let index = *table
                 .entity_map()
                 .get(entity)
                 .ok_or(DbError::EntityNotInTable(*entity, family))?;
+
+            println!("TABLE INDEX WAS {}", index);
 
             // here we get the column key for the specific component we're
             // interested in. column keys are a combination of the component type,
@@ -1110,11 +1180,14 @@ pub mod reckoning {
             // if/when it does exist, we instantiate space within it for our entity
             match opt_has_column_key {
                 Some(column_key) => {
+                    println!("COLUMN ALREADY EXISTS, USING INDEX {}", index);
+
                     self.columns
-                        .get(&column_key)
+                        .get_mut(&column_key)
                         .ok_or(DbError::ColumnDoesntExistInTable)?
-                        .instantiate_with(index, component)?;
-                }
+                        .set_component(entity, index, component)?;
+                },
+                
                 None => {
                     let mut table = self
                         .tables
@@ -1127,21 +1200,25 @@ pub mod reckoning {
                     let header = ColumnHeader {
                         tyid: component_type.inner(),
                         fn_constructor: ColumnInner::<C>::dynamic_ctor,
-                        fn_instance: ColumnInner::<C>::dynamic_instance,
-                        fn_move: ColumnInner::<C>::dynamic_pop_and_move,
-                        fn_resize: ColumnInner::<C>::dynamic_resize,
+                        fn_instance: ColumnInner::<C>::dynamic_push_instance,
+                        fn_move: ColumnInner::<C>::dynamic_move,
                         fn_swap_and_destroy: ColumnInner::<C>::dynamic_swap_and_destroy,
                         fn_debug: ColumnInner::<C>::dynamic_debug,
                     };
 
                     let column_inner = (header.fn_constructor)();
-                    let column = Column::new(header.clone(), column_inner);
+                    let mut column = Column::new(header.clone(), column_inner);
 
-                    column.instantiate_with(index, component)?;
+                    let instance_index = column.instance_with(entity, component)?;
+
+                    println!("INSTANCE INDEX WAS {}", instance_index);
+                    //debug_assert_eq!(index, instance_index);
 
                     self.columns.insert(new_column_key, column);
                     self.headers.insert(component_type, header.clone());
+
                     table.update_column_map(component_type, new_column_key);
+                    table.entity_map().insert(*entity, instance_index);
                 }
             }
 
@@ -1347,10 +1424,6 @@ pub mod reckoning {
                         let db = self.database();
                         let mut iter = RowIter::<'db, ($($t),+)>::new(db);
                         
-                        //for key in self.keys.iter() {
-                        //    println!("\tII{:?}", *db.get_column(key).unwrap());
-                        //}
-
                         for i in 0..(self.keys.len() / self.width) {
                             let borrows: ($($t::BorrowType,)+) = ($(
                                 unsafe {
@@ -1415,285 +1488,6 @@ impl_transformations!([A, 0], [B, 1], [C, 2], [D, 3], [E, 4], [F, 5], [G, 6]);
 impl_transformations!([A, 0], [B, 1], [C, 2], [D, 3], [E, 4], [F, 5], [G, 6], [H, 7]);
 
 // tests ===============================================================================
-
-#[cfg(test)]
-#[allow(dead_code)]
-mod vehicle_example {
-    #[allow(dead_code)]
-    #[allow(unused_assignments)]
-    #[allow(unused_variables)]
-    use super::reckoning::*;
-    use super::transform::*;
-
-    #[derive(Debug, Default, Clone)]
-    pub struct Physics {
-        pos: f64,
-        vel: f64,
-        acc: f64,
-    }
-
-    impl Component for Physics {}
-    impl Physics {
-        fn new() -> Self {
-            Default::default()
-        }
-    }
-
-    #[derive(Debug, Default, Clone)]
-    pub struct Wheels {
-        friction: f64,
-        torque: f64,
-        rpm: f64,
-        radius: f64,
-    }
-    impl Component for Wheels {}
-
-    #[derive(Debug, Default, Clone)]
-    pub struct Chassis {
-        weight: f64,
-    }
-    impl Component for Chassis {}
-    
-    #[derive(Debug, Default, Clone)]
-    pub struct Engine {
-        power: f64,
-        torque: f64,
-        rpm: f64,
-        maxrpm: f64,
-        throttle: f64,
-    }
-    impl Component for Engine {}
-
-    #[derive(Debug, Default, Clone)]
-    pub struct Transmission {
-        gears: Vec<f64>,
-        current_gear: Option<usize>,
-    }
-    impl Component for Transmission {}
-
-    #[derive(Debug, Default, Clone)]
-    pub enum Driver {
-        #[default]
-        SlowAndSteady,
-        PedalToTheMetal,
-    }
-    impl Component for Driver {}
-
-    #[derive(Debug, Default, Clone)]
-    pub struct VehicleName {
-        name: String,
-    }
-    impl Component for VehicleName {}
-
-    struct DriveTrain;
-    impl Transformation for DriveTrain {
-        type Data = (Read<Transmission>, Write<Engine>, Write<Wheels>);
-
-        fn run(data: Rows<Self::Data>) -> TransformationResult {
-            println!("running drive-train transformation");
-
-            // calculate engine torque & rpm
-
-            for (transmission, engine, wheels) in data {
-                if let Some(gear) = transmission.current_gear {
-                    if let Some(gear_ratio) = transmission.gears.get(gear) {
-                        wheels.torque = engine.torque * gear_ratio
-                    }
-                }
-            }
-            Ok(())
-        }
-    }
-
-    struct DriverInput;
-    impl Transformation for DriverInput {
-        type Data = (Read<Driver>, Write<Transmission>, Write<Engine>);
-
-        fn run(data: Rows<Self::Data>) -> TransformationResult {
-            println!("running driver transformation");
-
-            for (driver, transmission, engine) in data {
-                match driver {
-                    Driver::SlowAndSteady => match engine.rpm as u64 {
-                        0..=4999 => match transmission.current_gear {
-                            Some(_) => engine.throttle = 0.4,
-                            None => transmission.current_gear = Some(0),
-                        },
-                        5000.. => {
-                            engine.throttle = 0.0;
-                            if let Some(gear) = transmission.current_gear {
-                                if gear < transmission.gears.len() {
-                                    transmission.current_gear = Some(gear + 1)
-                                }
-                            }
-                        }
-                    },
-                    Driver::PedalToTheMetal => match engine.rpm as u64 {
-                        0..=4999 => match transmission.current_gear {
-                            Some(_) => engine.throttle = 1.0,
-                            None => transmission.current_gear = Some(0),
-                        },
-                        5000.. => {
-                            engine.throttle = 0.0;
-                            if let Some(gear) = transmission.current_gear {
-                                if gear < transmission.gears.len() {
-                                    transmission.current_gear = Some(gear + 1)
-                                }
-                            }
-                        }
-                    },
-                }
-            }
-
-            Ok(())
-        }
-    }
-
-    struct WheelPhysics;
-    impl Transformation for WheelPhysics {
-        type Data = (Write<Wheels>, Read<Chassis>, Write<Physics>);
-
-        fn run(data: Rows<Self::Data>) -> TransformationResult {
-            println!("running wheel physics transformation");
-
-            for (wheels, chassis, physics) in data {
-                physics.acc = wheels.torque / f64::max(wheels.radius, 1.0) / f64::max(chassis.weight, 1.0);
-                physics.vel += physics.acc;
-                physics.pos += physics.vel;
-                wheels.rpm = physics.vel * (60.0 / (2.0 * 3.14159) * wheels.radius);
-            }
-            Ok(())
-        }
-    }
-
-    struct PrintVehicleStatus;
-    impl Transformation for PrintVehicleStatus {
-        type Data = (Read<VehicleName>, Read<Physics>, Read<Engine>);
-
-        fn run(data: Rows<Self::Data>) -> TransformationResult {
-            for (name, phys, engine) in data {
-                println!("{:14}: {:5}m @ {:5}m/s ({:5}rpm)", name.name, phys.pos, phys.vel, engine.rpm);
-            }
-
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn vehicle_example() {
-        std::env::set_var("RUST_BACKTRACE", "1");
-
-        let mut db = EntityDatabase::new();
-
-        // Define some components from data, these could be loaded from a file
-        let v8_engine = Engine {
-            power: 400.0,
-            torque: 190.0,
-            rpm: 0.0,
-            maxrpm: 5600.0,
-            throttle: 0.0,
-        };
-        let diesel_engine = Engine {
-            power: 300.0,
-            torque: 650.0,
-            rpm: 0.0,
-            maxrpm: 3200.0,
-            throttle: 0.0,
-        };
-        let economy_engine = Engine {
-            power: 103.0,
-            torque: 90.0,
-            rpm: 0.0,
-            maxrpm: 6000.0,
-            throttle: 0.0,
-        };
-
-        let heavy_chassis = Chassis { weight: 7000.0 };
-        let sport_chassis = Chassis { weight: 2200.0 };
-        let cheap_chassis = Chassis { weight: 3500.0 };
-
-        let five_speed = Transmission {
-            gears: vec![2.95, 1.94, 1.34, 1.00, 0.73],
-            current_gear: None,
-        };
-
-        let ten_speed = Transmission {
-            gears: vec![4.69, 2.98, 2.14, 1.76, 1.52, 1.27, 1.00, 0.85, 0.68, 0.63],
-            current_gear: None,
-        };
-
-        // Build the entities from the components we choose
-        // This can be automated from data
-        let sports_car = db.create().unwrap();
-        db.add_component(sports_car, five_speed.clone()).unwrap();
-        db.add_component(sports_car, v8_engine.clone()).unwrap();
-
-        db.add_component(sports_car, sport_chassis).unwrap();
-        db.add_component(sports_car, Wheels::default()).unwrap();
-        db.add_component(sports_car, Physics::new()).unwrap();
-        db.add_component(sports_car, Driver::PedalToTheMetal).unwrap();
-
-        let pickup_truck = db.create().unwrap();
-        db.add_component(pickup_truck, v8_engine).unwrap();
-        db.add_component(pickup_truck, ten_speed).unwrap();
-        db.add_component(pickup_truck, heavy_chassis).unwrap();
-        db.add_component(pickup_truck, Wheels::default()).unwrap();
-        db.add_component(pickup_truck, Physics::new()).unwrap();
-        db.add_component(pickup_truck, Driver::SlowAndSteady)
-            .unwrap();
-
-        // Let's swap the engine in the truck for something more heavy duty
-        // Entities can only ever have a single component of a given type
-        db.add_component(pickup_truck, diesel_engine).unwrap();
-
-        let economy_car = db.create().unwrap();
-        db.add_component(economy_car, economy_engine.clone()).unwrap();
-        db.add_component(economy_car, cheap_chassis.clone()).unwrap();
-        db.add_component(economy_car, five_speed.clone()).unwrap();
-
-        // Lets name the 3 vehicles
-        db.add_component(sports_car, VehicleName { name: String::from("Sports Car") }).unwrap();
-        db.add_component(pickup_truck, VehicleName { name: String::from("Pickup Truck") }).unwrap();
-        db.add_component(economy_car, VehicleName { name: String::from("Economy Car") }).unwrap();
-        
-        // Create a simulation phase. It is important to note that things
-        // that happen in a single phase are unordered. If it is important
-        // for a certain set of transformations to happen before or after
-        // another set of transformations, you must break them into distinct
-        // phases. Each phase will run sequentially, and each transformation
-        // within a phase will (try to) run in parallel
-        let mut race = Phase::new();
-        //race.add_transformation(DriveTrain);
-        race.add_transformation(WheelPhysics);
-        race.add_transformation(DriverInput);
-        //race.add_transformation(PrintVehicleStatus);
-
-        // The simulation loop. Here we can see that, fundamentally, the
-        // simulation is nothing but a set of transformations on our
-        // dataset run over and over. By adding more components and
-        // transformations to the simulation we expand its capabilities
-        // while automatically leveraging parallelism
-        let mut loops = 0;
-        loop {
-            race.run_on(&db).unwrap();
-
-            // Here we allow the database to communicate back with the
-            // simulation loop through commands
-            while let Some(command) = db.query_commands() {
-                match command {
-                    Command::Quit => break,
-                }
-            }
-
-            if loops < 3 {
-                loops += 1;
-            } else {
-                println!("Exiting!");
-                break;
-            }
-        }
-    }
-}
 
 mod collision_example {
     use integrator::{Vector, Point};
