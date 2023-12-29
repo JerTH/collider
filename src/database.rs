@@ -4,14 +4,11 @@ pub mod reckoning {
     use core::fmt;
     // misc
     use std::any::Any;
-    use std::any::type_name;
-    use std::collections::HashSet;
     use std::error::Error;
     use std::fmt::Debug;
     use std::fmt::Display;
     use std::hash::Hash;
 
-    use std::ops::Deref;
     // sync
     use std::sync::atomic::AtomicU32;
     use std::sync::atomic::Ordering;
@@ -19,7 +16,6 @@ pub mod reckoning {
     use std::sync::Mutex;
     use std::sync::PoisonError;
     use std::sync::RwLock;
-    use std::sync::RwLockReadGuard;
     use std::sync::RwLockWriteGuard;
 
     // collections
@@ -31,14 +27,11 @@ pub mod reckoning {
     use crate::column::ColumnHeader;
     use crate::column::ColumnInner;
     use crate::column::ColumnKey;
-    use crate::column::BorrowColumnAs;
     use crate::column::ColumnMoveResult;
     use crate::column::ColumnSwapRemoveResult;
     use crate::id::*;
     use crate::table::*;
     use crate::EntityId;
-    use crate::transform::Read;
-    use crate::transform::Reads;
 
     // typedefs
     pub(crate) type AnyPtr = Box<dyn Any>;
@@ -674,8 +667,6 @@ pub mod reckoning {
 
         /// Destroys an entity, deleting its components and associated data
         pub fn destroy(&self, entity: EntityId) -> Result<(), DbError> {
-            todo!();
-
             let family = self.query_mapping(&entity).ok_or(DbError::EntityDoesntExist(entity))?;
             let table = self
                 .tables
@@ -759,10 +750,10 @@ pub mod reckoning {
                 },
                 TableResult::EntityInserted(index) => {
                     for (ty, key) in table.column_map() {
-                        if let Some(mut column) = self.columns.get_mut(key) {
+                        if let Some(_) = self.columns.get_mut(key) {
                             //assert_eq!(index, column.instance(entity)?);
                         } else {
-                            let mut column = self.build_typed_column_for_family(*family, ty)?;
+                            let _ = self.build_typed_column_for_family(*family, ty)?;
                             //assert_eq!(index, column.instance(entity)?);
                         }
                     }
@@ -1159,7 +1150,7 @@ pub mod reckoning {
             let opt_has_column_key = table.column_map().get(&ComponentType::of::<C>()).cloned();
 
             drop(table); // release read lock. we might re-acquire a write lock below
-            
+
             // here we check if the column we are interested actually exists or not
             // if it doesn't exist, we create it first
             // if/when it does exist, we instantiate space within it for our entity
@@ -1308,12 +1299,12 @@ pub mod reckoning {
             (**self).get_mut(index)
         }
     }
-
+    
     /// Macros
     ///
-    /// WARNING: ABSOLUTELY RIDICULOUS TYPE SYSTEM/MACRO SHENANIGANS BEYOND THIS POINT
+    /// WARNING: TYPE SYSTEM/MACRO SHENANIGANS BEYOND THIS POINT
     /// 
-    /// These macros make it possible to perform fast and ergonomic
+    /// These macros make it possible to perform ergonomic
     /// selections of data in an [super::EntityDatabase]
     #[macro_use]
     pub mod macros {
@@ -1466,134 +1457,3 @@ impl_transformations!([A, 0], [B, 1], [C, 2], [D, 3], [E, 4]);
 impl_transformations!([A, 0], [B, 1], [C, 2], [D, 3], [E, 4], [F, 5]);
 impl_transformations!([A, 0], [B, 1], [C, 2], [D, 3], [E, 4], [F, 5], [G, 6]);
 impl_transformations!([A, 0], [B, 1], [C, 2], [D, 3], [E, 4], [F, 5], [G, 6], [H, 7]);
-
-// tests ===============================================================================
-
-mod collision_example {
-    use integrator::{Vector, Point};
-    use crate::transform::{Transformation, TransformationResult, Read, Write};
-    
-    use super::*;
-
-    #[derive(Debug, Clone)]
-    enum CollisionShape {
-        Circle { radius: f64 }
-    }
-    impl Component for CollisionShape {}
-    impl Default for CollisionShape {
-        fn default() -> Self {
-            Self::Circle { radius: 0.0 }
-        }
-    }
-    
-    #[derive(Debug, Clone)]
-    struct CollisionEvent {
-        pub location: Vector,
-    }
-
-    impl CollisionEvent {
-        fn new() -> Self {
-            Self {
-                location: Default::default()
-            }
-        }
-    }
-
-    #[derive(Default, Debug, Clone)]    
-    struct CollisionEvents {
-        pending: Vec<CollisionEvent>,
-    }
-    impl Component for CollisionEvents {}
-
-    #[derive(Default, Debug, Clone)]
-    struct Physics {
-        pos: Point,
-        vel: Vector,
-        acc: Vector,
-    }
-    impl Component for Physics {}
-
-    struct Motion;
-    impl Transformation for Motion {
-        type Data = Write<Physics>;
-
-        fn run(data: Rows<Self::Data>) -> TransformationResult {
-            for physics in data {
-                let physics = physics.0;
-                physics.pos = physics.pos + physics.vel;
-                physics.pos = physics.pos + physics.vel;
-                physics.pos = physics.pos + physics.vel;
-            }
-            Ok(())
-        }
-    }
-
-    struct CollisionDetection;
-    impl CollisionDetection {
-        // detailed implementation of collision detection can go here
-        // e.g., this system can keep track of positions and velocities
-        // internally in a more efficient spatial data structure and perform
-        // tests there, and then simply write the resulting authoritative
-        // data back into publicly visible components
-    }
-
-    impl Transformation for CollisionDetection {
-        type Data = (Read<Physics>, Read<CollisionShape>, Write<CollisionEvents>);
-
-        fn run(data: Rows<Self::Data>) -> TransformationResult {
-            for first in (&data).into_iter().enumerate() {
-                let (a_index, (a_physics, a_shape, a_event)) = first;
-                
-                let skip = a_index;
-                for second in (&data).into_iter().skip(skip).enumerate() {
-                    let (b_index, (b_physics, b_shape, b_event)) = second;
-
-                    if a_index == b_index {
-                        continue;
-                    }
-
-                    use CollisionShape::Circle;
-                    match (a_shape, b_shape) {
-                        (Circle { radius: a_radius }, Circle { radius: b_radius }) => {
-                            if a_physics.pos.distance_to(&b_physics.pos) <= a_radius + b_radius {
-                                let collision = CollisionEvent::new();
-                                a_event.pending.push(collision.clone());
-                                b_event.pending.push(collision);
-                            }
-                        },
-                    }
-                }
-            }
-
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn collision_example() {
-        std::env::set_var("RUST_BACKTRACE", "1");
-
-        let mut db = EntityDatabase::new();
-
-        const NUM_COLLIDERS: usize = 30;
-        const COLLIDER_SIZE: f64 = 10.0;
-
-        for _ in 0..NUM_COLLIDERS {
-            let collider = db.create().unwrap();
-            let position = Point::new(0.0, 0.0, 0.0);
-            let physics = Physics { 
-                pos: position, 
-                vel: Default::default(), 
-                acc: Default::default()
-            };
-            let shape = CollisionShape::Circle {
-                radius: COLLIDER_SIZE
-            };
-
-            db.add_component(collider, physics).unwrap();
-            db.add_component(collider, shape).unwrap();
-        }
-    }
-}
-
-// CLEAR: "\x1B[2J\x1B[1;H"

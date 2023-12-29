@@ -274,10 +274,10 @@ fn vehicle_example() {
     // phases. Each phase will run sequentially, and each transformation
     // within a phase will (try to) run in parallel
     let mut race = Phase::new();
-    //race.add_transformation(DriveTrain);
+    race.add_transformation(DriveTrain);
     race.add_transformation(WheelPhysics);
     race.add_transformation(DriverInput);
-    //race.add_transformation(PrintVehicleStatus);
+    race.add_transformation(PrintVehicleStatus);
 
     // The simulation loop. Here we can see that, fundamentally, the
     // simulation is nothing but a set of transformations on our

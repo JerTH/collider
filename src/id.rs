@@ -2,7 +2,7 @@ use std::hash::Hash;
 use std::ops::Deref;
 use std::fmt::{Display, self};
 use std::sync::{RwLock, Arc};
-use std::collections::{HashMap};
+use std::collections::HashMap;
 use std::sync::LazyLock;
 use std::fmt::Debug;
 
@@ -159,10 +159,6 @@ impl EntityId {
                 self.generational.3,
             )})
         }
-    }
-    
-    pub(crate) fn generational(idx: u32, gen: u16, m1: u8, m2: u8) -> Self {
-        EntityId(IdUnion{generational: (idx, gen, m1, m2)})
     }
 }
 

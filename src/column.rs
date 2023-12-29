@@ -1,19 +1,17 @@
 use std::{
     cell::UnsafeCell,
     fmt::Display,
-    marker::PhantomData,
-    ops::{Deref, DerefMut},
-    ptr::NonNull, any::{Any, TypeId, type_name}, borrow::Borrow, os::raw::c_void,
+    ptr::NonNull, any::Any,
 };
 
 use crate::{
     borrowed::{BorrowError, BorrowRef, BorrowRefMut, BorrowSentinel, RawBorrow},
     database::{
-        reckoning::{AnyPtr, DbError, Family},
+        reckoning::{AnyPtr, DbError},
         Component, ComponentType,
     },
     id::{StableTypeId, CommutativeId, FamilyId},
-    EntityId, transform::{Read, Write},
+    EntityId,
 };
 
 pub struct ColumnRef<C: Component> {
@@ -151,7 +149,7 @@ impl<C: Component> ColumnRefMut<C> {
         
         Ok(())
     }
-    
+
     unsafe fn deref_parts_mut(&mut self) -> (&mut Vec<C>, &mut Vec<EntityId>) {
         (self.ptr_components.as_mut(), self.ptr_entity_map.as_mut())
     }
@@ -244,23 +242,14 @@ pub trait BorrowColumnAs<C, R> {
 
 impl<C: Component> BorrowColumnAs<C, ColumnRef<C>> for Column {
     fn borrow_column_as(&self) -> ColumnRef<C> {
-        //println!("BorrowColumnAs -> ColumnType:    {:?} / {:?}", TypeId::of::<ColumnInner<C>>(), type_name::<C>());
         self.get_inner_ref()
     }
-    //fn borrow_column_as<ColumnRef<'b, C>>(&'b self) -> ColumnRef<'b, C> {
-    //    self.get_ref()
-    //}
 }
 
 impl<C: Component> BorrowColumnAs<C, ColumnRefMut<C>> for Column {
     fn borrow_column_as(&self) -> ColumnRefMut<C> {
-        //println!("BorrowColumnAsMut -> ColumnType: {:?} / {:?}", TypeId::of::<ColumnInner<C>>(), type_name::<C>());
         self.get_inner_ref().ascend()
     }
-    //fn borrow_column_as(&'b self) -> ColumnRefMut<'b, C> {
-    //    let r = self.get_ref();
-    //    r.ascend()
-    //}
 }
 
 impl<'b> Column {
@@ -269,8 +258,6 @@ impl<'b> Column {
     }
 
     pub(crate) fn instance_with<C: Component>(&mut self, entity: &EntityId, component: C) -> Result<usize, DbError> {
-        println!("INSTANCE {:?} WITH {}", entity, type_name::<C>());
-
         let index = self.instance(entity)?;
         unsafe { self.get_inner_ref_mut().set_component(entity, index, component)? }
         Ok(index)

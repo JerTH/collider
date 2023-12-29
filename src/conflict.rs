@@ -288,21 +288,21 @@ where
     }
 }
 
-pub struct ConflictGraphIter<'g, K, T> {
-    colors: &'g HashMap<K, T>,
-}
-
-impl<'g, K, T> Iterator for ConflictGraphIter<'g, K, T>
-where
-    T: 'g,
-    K: 'g,
-{
-    type Item = &'g [(K, T)];
-
-    fn next(&mut self) -> Option<Self::Item> {
-        todo!()
-    }
-}
+//pub struct ConflictGraphIter<'g, K, T> {
+//    colors: &'g HashMap<K, T>,
+//}
+//
+//impl<'g, K, T> Iterator for ConflictGraphIter<'g, K, T>
+//where
+//    T: 'g,
+//    K: 'g,
+//{
+//    type Item = &'g [(K, T)];
+//
+//    fn next(&mut self) -> Option<Self::Item> {
+//        todo!()
+//    }
+//}
 
 #[cfg(test)]
 mod test {

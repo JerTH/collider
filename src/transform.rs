@@ -3,20 +3,14 @@
 //! Functionality related to transforming data contained in an
 //! [crate::database::reckoning::EntityDatabase]
 
-use crate::borrowed::BorrowRef;
 use crate::borrowed::RawBorrow;
-use crate::column;
-use crate::column::Column;
 use crate::column::ColumnKey;
 use crate::column::ColumnRef;
 use crate::column::ColumnRefMut;
 use crate::database::ComponentType;
 use crate::conflict::ConflictGraph;
 use crate::conflict::Dependent;
-use crate::database::reckoning::ColumnMapRef;
 use crate::database::reckoning::ComponentTypeSet;
-use std::any::Any;
-use std::cell::Cell;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::marker::PhantomData;
@@ -218,15 +212,24 @@ impl<'db, C> const MetaData for Read<C> where C: Component {}
 impl<'db, C> const MetaData for Write<C> where C: Component {}
 
 pub struct RowIter<'db, RTuple> {
-    pub(crate) db: &'db EntityDatabase,
+    // allow statement fixes never read lint - this is in fact read but only from a macro
+    #[allow(dead_code)] pub(crate) db: &'db EntityDatabase,
+
     marker: PhantomData<RTuple>,
 
-    /// Table-wise list of columns to iterate through
+    /// Full list of columns to iterate through, ordered by table,
+    /// we track the keys, as well as the runtime checked borrows and pointers to
+    /// the raw column data 
     pub(crate) keys: Vec<ColumnKey>,
     pub(crate) borrows: Vec<(RawBorrow, NonNull<c_void>)>,
 
+    /// The width of the resultant tuple we yield during iteration
     pub(crate) width: usize,
+
+    /// Which table we are currently iterating
     pub(crate) table_index: usize,
+
+    /// Which column index we are currently yielding
     pub(crate) column_index: usize,
 }
 

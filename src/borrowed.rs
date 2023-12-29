@@ -4,15 +4,9 @@
 //! to table columns
 
 
-use std::cell::UnsafeCell;
-use std::fmt::Display;
-use std::marker::PhantomData;
-use std::ops::{Deref, DerefMut};
-use std::ptr::NonNull;
+use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicIsize, Ordering};
-use crate::EntityId;
-use crate::database::reckoning::{AnyPtr, Component, DbError};
 
 const ONE_SHARED_BORROW: isize = 1isize;
 const NOT_BORROWED: isize = 0isize;
