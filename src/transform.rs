@@ -98,8 +98,6 @@ impl<'db> Phase<'db> {
                 let transform_result = dyn_transformation.ptr.run_on(db);
                 subphase_results.push((id, transform_result));
             }
-            //println!("subphase results:\n");
-            //println!("{:#?}\n\n", subphase_results);
             // TODO: engage multithreading here
         }
         Ok(())
@@ -137,9 +135,6 @@ where
     RTuple::Data: Selection,
 {
     fn run_on(&self, db: &EntityDatabase) -> TransformationResult {
-        //println!("READS:  {:?}", RTuple::Data::READS);
-        //println!("WRITES: {:?}", RTuple::Data::WRITES);
-
         let mut row_components: Vec<ComponentType> = Vec::new();
 
         let reads = RTuple::Data::READS;
@@ -147,7 +142,6 @@ where
 
         reads.iter().zip(writes.iter()).for_each(|(read, write)| {
             let component_access = read.or(*write).expect("expected read/write");
-            //println!("ACCESS: {:?}", &component_access);
             row_components.push(component_access);
         });
         
@@ -174,11 +168,6 @@ where
                 }
             });
         
-        //println!("{:#?}", component_set);
-        //for key in column_keys.iter() {
-        //    println!("{:?}", *db.get_column(key).unwrap());
-        //}
-
         let rows = Rows::<RTuple::Data> {
             db,
             keys: column_keys,

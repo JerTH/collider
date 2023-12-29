@@ -758,13 +758,10 @@ pub mod reckoning {
                     return Ok(index)
                 },
                 TableResult::EntityInserted(index) => {
-                    println!("ENTITY INSERTED ({:?})", entity);
                     for (ty, key) in table.column_map() {
                         if let Some(mut column) = self.columns.get_mut(key) {
-                            println!("\tINSTANCE IN EXISTING COLUMN ({})", ty);
                             //assert_eq!(index, column.instance(entity)?);
                         } else {
-                            println!("\tINSTANCE IN NEW COLUMN ({})", ty);
                             let mut column = self.build_typed_column_for_family(*family, ty)?;
                             //assert_eq!(index, column.instance(entity)?);
                         }
@@ -924,11 +921,9 @@ pub mod reckoning {
                 }
             });
 
-            //println!("BUILDING A TABLE FOR {:?} COMPONENTS", components.len());
             let mut table = Table::new(family_id, components.clone());
 
             headers.iter().for_each(|header| {
-                //println!("BUILDING TABLE COLUMNS LOOP");
                 let component_type = ComponentType::from(header.stable_type_id());
                 let column_inner = (header.fn_constructor)();
                 let column = Column::new(header.clone(), column_inner);
@@ -1030,7 +1025,6 @@ pub mod reckoning {
             from_family: &FamilyId,
             dest_family: &FamilyId,
         ) -> Result<(), DbError> {
-            println!("MOVING COMPONENTS...");
             let from_table = self
                 .tables
                 .get(from_family)
@@ -1046,13 +1040,10 @@ pub mod reckoning {
                 .get(entity)
                 .ok_or(DbError::EntityNotInTable(*entity, *from_family))?;
 
-            println!("FROM INDEX: {}", from_index);
-            
             // assume the move will fail, update this if it succeeds
             let mut move_result: Result<ColumnMoveResult, DbError> = Err(DbError::ColumnDoesntExistInTable);
             
             for (ty, from_key) in from_table.column_map().iter() {
-                println!("FROM TABLE LOOP");
                 let from_col = self.get_column_mut(from_key);
                 let dest_col = dest_table
                     .column_map()
@@ -1144,8 +1135,6 @@ pub mod reckoning {
             entity: &EntityId,
             component: C,
         ) -> Result<(), DbError> {
-            println!("SET COMPONENT {} FOR {:?}", type_name::<C>(), entity);
-
             let family: FamilyId = self
                 .query_mapping(entity)
                 .ok_or(DbError::EntityDoesntExist(*entity))?;
@@ -1157,8 +1146,6 @@ pub mod reckoning {
                 .get(&family)
                 .ok_or(DbError::TableDoesntExistForFamily(family))?;
 
-            println!("TABLE HAS {} ENTITIES", table.entity_map().len());
-
             // here we get the index that the table is storing the entity in
             // we error out the table doesn't know about the entity
             let index = *table
@@ -1166,22 +1153,18 @@ pub mod reckoning {
                 .get(entity)
                 .ok_or(DbError::EntityNotInTable(*entity, family))?;
 
-            println!("TABLE INDEX WAS {}", index);
-
             // here we get the column key for the specific component we're
             // interested in. column keys are a combination of the component type,
             // and the table it belongs to
             let opt_has_column_key = table.column_map().get(&ComponentType::of::<C>()).cloned();
 
             drop(table); // release read lock. we might re-acquire a write lock below
-
+            
             // here we check if the column we are interested actually exists or not
             // if it doesn't exist, we create it first
             // if/when it does exist, we instantiate space within it for our entity
             match opt_has_column_key {
                 Some(column_key) => {
-                    println!("COLUMN ALREADY EXISTS, USING INDEX {}", index);
-
                     self.columns
                         .get_mut(&column_key)
                         .ok_or(DbError::ColumnDoesntExistInTable)?
@@ -1210,9 +1193,6 @@ pub mod reckoning {
                     let mut column = Column::new(header.clone(), column_inner);
 
                     let instance_index = column.instance_with(entity, component)?;
-
-                    println!("INSTANCE INDEX WAS {}", instance_index);
-                    //debug_assert_eq!(index, instance_index);
 
                     self.columns.insert(new_column_key, column);
                     self.headers.insert(component_type, header.clone());

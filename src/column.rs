@@ -136,22 +136,22 @@ impl<C: Component> ColumnRefMut<C> {
     pub(crate) unsafe fn set_component(&mut self, entity: &EntityId, index: usize, component: C) -> Result<(), DbError> {
         let (components, entities) = self.deref_parts_mut();
         debug_assert_eq!(components.len(), entities.len());
-        
-        if components.is_empty() {
-            if index == 0 {
-                components.push(component);
-                entities.push(*entity);
+
+        if components.len() == index {
+            components.push(component);
+            entities.push(*entity);
+        } else {
+            if components.len() > index {
+                let component_ref = components.get_mut(index).ok_or(DbError::ColumnAccessOutOfBounds)?;
+                *component_ref = component;
             } else {
                 return Err(DbError::ColumnAccessOutOfBounds)
             }
-        } else {
-            let component_ref = components.get_mut(index).ok_or(DbError::ColumnAccessOutOfBounds)?;
-            *component_ref = component;
         }
         
         Ok(())
     }
-
+    
     unsafe fn deref_parts_mut(&mut self) -> (&mut Vec<C>, &mut Vec<EntityId>) {
         (self.ptr_components.as_mut(), self.ptr_entity_map.as_mut())
     }

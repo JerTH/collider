@@ -1,9 +1,9 @@
-use std::{marker::PhantomData, collections::HashMap};
+use std::ops::Rem;
+use std::collections::HashMap;
 use std::fmt::Debug;
 
 use collider::transform::{Read, Phase};
 use collider::{*, database::{EntityDatabase, Component}, transform::{Transformation, Write}};
-
 
 #[test]
 pub fn rocket_launch() {
@@ -14,13 +14,23 @@ pub fn rocket_launch() {
     let mission_control = db.create().unwrap();
     db.add_component(mission_control, MissionController::new()).unwrap();
     db.add_component(mission_control, Radio::default()).unwrap();
-    
-    let rocket = db.create().unwrap();
-    db.add_component(rocket, Physics::default()).unwrap();
-    db.add_component(rocket, FuelTank::new(1000.0, 80.0, 0.5)).unwrap();
-    db.add_component(rocket, Avionics::default()).unwrap();
-    db.add_component(rocket, Radio::default()).unwrap();
-    db.add_component(rocket, MainEngine::default()).unwrap();
+
+    let mut rockets = Vec::new();
+    for i in 0..10000u64 {
+        let rand: f64 = (0..8).fold(3029487435683079979u64, |a, j: u64| 
+              (a.overflowing_mul(a).0)
+            ^ (j.overflowing_mul(j).0.overflowing_mul(j).0)
+            ^ (i.overflowing_mul(a).0.overflowing_mul(i).0.overflowing_mul(j).0)
+        ).rem(1000) as f64 / 1000.0;
+
+        let rocket = db.create().unwrap();
+        db.add_component(rocket, Physics::default()).unwrap();
+        db.add_component(rocket, FuelTank::new(100.0, 100.0, 0.5)).unwrap();
+        db.add_component(rocket, Avionics::default()).unwrap();
+        db.add_component(rocket, Radio::default()).unwrap();
+        db.add_component(rocket, MainEngine { efficiency: rand, max_thrust: 900.0 * rand + 100.0, throttle: 0.0, mass: 10.0  }).unwrap();
+        rockets.push(rocket)
+    }
 
     let mut simulation = Phase::new();
     simulation.add_transformation(RadioSystem {});
@@ -33,9 +43,6 @@ pub fn rocket_launch() {
     loop {
         loops += 1;
         simulation.run_on(&db).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(250));
-        
-        println!("{}", db);
 
         if loops > 100 {
             break;
@@ -75,7 +82,7 @@ impl FuelTank {
 
 #[derive(Debug, Clone)]
 pub struct MainEngine {
-    efficieny: f64,
+    efficiency: f64,
     max_thrust: f64,
     throttle: f64,
     mass: f64,
@@ -90,7 +97,7 @@ impl Component for MainEngine {}
 impl Default for MainEngine {
     fn default() -> Self {
         Self {
-            efficieny: 0.85,
+            efficiency: 0.85,
             max_thrust: 400.0,
             throttle: Default::default(),
             mass: 1.0,
@@ -153,9 +160,6 @@ impl Transformation for PhysicsSystem {
 
     fn run(data: transform::Rows<Self::Data>) -> transform::TransformationResult {
         for (physics,) in data {
-            println!("/nF: {}, nM: {}", physics.net_force, physics.net_mass);
-            println!("\\A: {}, V: {}, At: {}", physics.acceleration, physics.velocity, physics.altitude);
-
             physics.acceleration = physics.net_force / physics.net_mass;
             physics.velocity = f64::max(0.0, physics.velocity + physics.acceleration);
             physics.altitude = f64::max(0.0, physics.altitude + physics.velocity);
@@ -176,7 +180,7 @@ impl Transformation for RocketSystem {
             }
             
             let fuel_available = if fueltank.cur_capacity > 0.0 {
-                let fuel_available = f64::max(0.0, f64::min(1.0 / engine.efficieny, fueltank.cur_capacity));
+                let fuel_available = f64::max(0.0, f64::min(1.0 / engine.efficiency, fueltank.cur_capacity));
                 fueltank.cur_capacity -= fuel_available;
                 fuel_available
             } else {
@@ -197,13 +201,13 @@ impl Transformation for RocketAvionicsSystem {
     type Data = (Write<Radio>, Write<Avionics>, Write<MainEngine>, Read<Physics>);
 
     fn run(data: transform::Rows<Self::Data>) -> transform::TransformationResult {
-        for (radio, avionics, engine, physics) in data {
+        for (radio, avionics, engine, _physics) in data {
             match &radio.rx {
                 RadioSignal::Message(message) => {
                     match message.as_str() {
                         "Launch!" => {
                             if avionics.state != AvionicsState::Launch {
-                                println!("Rocket: Guidance is internal!");
+                                //println!("Rocket: Guidance is internal!");
                             }
 
                             avionics.state = AvionicsState::Launch;
@@ -211,14 +215,14 @@ impl Transformation for RocketAvionicsSystem {
                         },
                         "Abort!" => {
                             if avionics.state != AvionicsState::Abort {
-                                println!("Rocket: Abort Mission! Abort Mission!!!");
+                                //println!("Rocket: Abort Mission! Abort Mission!!!");
                             }
 
                             avionics.state = AvionicsState::Abort;
                             engine.throttle = 0.0;
                         },
-                        msg => {
-                            println!("Rocket: Control, please repeat last? ({})", msg);
+                        _ => {
+                            // Control, please repeat last?
                         }
                     }
                 },
@@ -228,7 +232,7 @@ impl Transformation for RocketAvionicsSystem {
             }
 
             if avionics.state == AvionicsState::Launch {
-                radio.tx = RadioSignal::Message(format!("current altitude: {}", physics.altitude))
+                //radio.tx = RadioSignal::Message(format!("current altitude: {}", physics.altitude))
             }
         }
         Ok(())
@@ -244,7 +248,6 @@ impl Transformation for MissionControlSystem {
             radio.ch = 0;
             if control.countdown > 0 {
                 println!("{}!", control.countdown);
-
                 radio.tx = RadioSignal::Noise;
                 control.countdown -= 1;
             } else {
@@ -256,8 +259,7 @@ impl Transformation for MissionControlSystem {
             }
 
             match &radio.rx {
-                RadioSignal::Message(message) => {
-                    println!("Mission Control: Recieved a message from rocket... \"{}\"", message);
+                RadioSignal::Message(_) => {
                     radio.rx = RadioSignal::Noise;
                 },
                 RadioSignal::Noise => {
