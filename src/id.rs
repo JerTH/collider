@@ -8,9 +8,6 @@ use std::fmt::Debug;
 
 use dashmap::DashSet;
 
-use crate::database::ComponentType;
-
-
 #[derive(Copy, Clone)]
 pub union IdUnion {
     /// Interprets the id as (id, generation, _, flags)
@@ -55,8 +52,8 @@ impl Display for FamilyId {
     }
 }
 
-impl<'i> FromIterator<&'i ComponentType> for FamilyId {
-    fn from_iter<T: IntoIterator<Item = &'i ComponentType>>(iter: T) -> Self {
+impl<'i> FromIterator<&'i crate::components::ComponentType> for FamilyId {
+    fn from_iter<T: IntoIterator<Item = &'i crate::components::ComponentType>>(iter: T) -> Self {
         FamilyId(CommutativeId::from_iter(iter.into_iter().map(|id| id.inner().raw_id())))
     }
 }
@@ -266,8 +263,8 @@ impl CommutativeId {
     }
 }
 
-impl From<(FamilyId, ComponentType)> for CommutativeId {
-    fn from(value: (FamilyId, ComponentType)) -> Self {
+impl From<(FamilyId, crate::components::ComponentType)> for CommutativeId {
+    fn from(value: (FamilyId, crate::components::ComponentType)) -> Self {
         let family_id = value.0;
         let stable_id = value.1.inner();
         (family_id.0).and(&CommutativeId(stable_id.raw_id()))

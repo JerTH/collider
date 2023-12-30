@@ -10,10 +10,12 @@
 // Incomplete feature - monitor with caution
 #![feature(return_position_impl_trait_in_trait)]
 
+// Module declarations
 #[macro_use]
 pub(crate) mod macros;
 pub mod id;
 pub mod borrowed;
+pub mod components;
 pub mod column;
 pub mod table;
 pub mod transform;
@@ -21,4 +23,8 @@ pub mod conflict;
 pub mod database;
 pub mod indexing;
 
+// Use declarations
 pub use id::EntityId;
+pub use components::Component;
+pub use database::EntityDatabase;
+pub use transform::{ Phase, Transformation, Read, Write };

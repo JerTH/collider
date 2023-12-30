@@ -8,10 +8,8 @@ use dashmap::DashMap;
 
 use crate::{
     column::ColumnKey,
-    database::{
-        reckoning::{ComponentTypeSet, DbError},
-        ComponentType,
-    },
+    components::{ ComponentTypeSet, ComponentType},
+    database::reckoning::DbError,
     id::FamilyId,
     EntityId,
 };
@@ -36,7 +34,7 @@ pub struct Table {
 
 impl Table {
     /// Creates a new [`Table`].
-    pub fn new(family: FamilyId, components: ComponentTypeSet) -> Self {
+    pub(crate) fn new(family: FamilyId, components: ComponentTypeSet) -> Self {
         Table {
             family,
             components,

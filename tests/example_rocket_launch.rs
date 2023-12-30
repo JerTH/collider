@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 
 use collider::transform::{Read, Phase};
-use collider::{*, database::{EntityDatabase, Component}, transform::{Transformation, Write}};
+use collider::{*, transform::{Transformation, Write}};
 
 #[test]
 pub fn rocket_launch() {

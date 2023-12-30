@@ -19,7 +19,6 @@ pub mod reckoning {
     use std::sync::RwLockWriteGuard;
 
     // collections
-    use std::collections::BTreeSet;
     use std::collections::HashMap;
     
     // crate
@@ -29,6 +28,10 @@ pub mod reckoning {
     use crate::column::ColumnKey;
     use crate::column::ColumnMoveResult;
     use crate::column::ColumnSwapRemoveResult;
+    use crate::components::Component;
+    use crate::components::ComponentDelta;
+    use crate::components::ComponentType;
+    use crate::components::ComponentTypeSet;
     use crate::id::*;
     use crate::table::*;
     use crate::EntityId;
@@ -42,15 +45,7 @@ pub mod reckoning {
     use dashmap::mapref::one::RefMut as DashMapRefMut;
     use itertools::Itertools;
     use transfer::TransferGraph;
-
-    use super::SelectOne;
-
-    pub trait Component: Default + Debug + Clone + 'static {}
-
-    /// Component implementation for the unit type
-    /// Every entity automatically gets this component upon creation
-    impl Component for () {}
-
+    
     pub trait DbMapping<'db> {
         type Guard;
         type From;
@@ -232,133 +227,7 @@ pub mod reckoning {
         }
     }
 
-    #[derive(Copy, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub struct ComponentType(StableTypeId);
-
-    impl ComponentType {
-        pub const fn of<C: Component>() -> Self {
-            Self(StableTypeId::of::<C>())
-        }
-
-        pub fn inner(&self) -> StableTypeId {
-            return self.0;
-        }
-    }
-
-    impl From<StableTypeId> for ComponentType {
-        fn from(value: StableTypeId) -> Self {
-            Self(value)
-        }
-    }
-
-    impl Display for ComponentType {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            let full_name = self.0.name().unwrap_or("{unknown}");
-            let split_str = full_name.rsplit_once("::");
-            let substring = split_str.unwrap_or((full_name, full_name)).1;
-            write!(f, "{}", substring)
-        }
-    }
-
-    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub struct ComponentTypeSet {
-        ptr: Arc<BTreeSet<ComponentType>>, // thread-local?
-        id: u64,
-    }
-
-    impl ComponentTypeSet {
-        pub fn contains(&self, component: &ComponentType) -> bool {
-            self.ptr.contains(component)
-        }
-
-        pub fn iter(&self) -> impl Iterator<Item = &ComponentType> {
-            self.ptr.iter()
-        }
-
-        pub fn names(&self) -> String {
-            let out = self.ptr.iter().fold(String::new(), |out, c| {
-                out + &String::from(format!("{}, ", c))
-            });
-            format!("[{}]", out.trim_end_matches([' ', ',']))
-        }
-
-        /// Returns number of [ComponentType]'s in this [ComponentTypeSet]
-        pub fn len(&self) -> usize {
-            self.ptr.len()
-        }
-
-        /// Given a [ComponentTypeSet], compute a set of all subsets of
-        /// the unique member components.
-        pub fn power_set(&self) -> Vec<ComponentTypeSet>{
-            self.ptr.iter().cloned().powerset().map(|subset| {
-                ComponentTypeSet::from(subset)
-            }).collect()
-        }
-    }
-
-    impl Display for ComponentTypeSet {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            for ty in self.ptr.iter() {
-                write!(f, "{:?}", ty)?;
-            }
-            Ok(())
-        }
-    }
-
-    impl<I> From<I> for ComponentTypeSet 
-    where
-        I: IntoIterator<Item = ComponentType>
-    {
-        fn from(iter: I) -> Self {
-            let mut id: u64 = 0;
-
-            // sum the unique 64 bit id's for each component type
-            // and collect them into a set, use the summed id
-            // (which should have a similar likelyhood of collision
-            // as any 64 bit hash) and use that as the unique id for
-            // the set of components
-            let set: BTreeSet<ComponentType> = iter
-                .into_iter()
-                .map(|c| {
-                    id = id.wrapping_add(c.0 .0);
-                    c
-                })
-                .collect();
-            ComponentTypeSet {
-                ptr: Arc::new(set),
-                id,
-            }
-        }
-    }
     
-    //impl FromIterator<ComponentType> for ComponentTypeSet {
-    //    fn from_iter<T: IntoIterator<Item = ComponentType>>(iter: T) -> Self {
-    //        let mut id: u64 = 0;
-    //
-    //        // sum the unique 64 bit id's for each component type
-    //        // and collect them into a set, use the summed id
-    //        // (which should have a similar likelyhood of collision
-    //        // as any 64 bit hash) and use that as the unique id for
-    //        // the set of components
-    //        let set: BTreeSet<ComponentType> = iter
-    //            .into_iter()
-    //            .map(|c| {
-    //                id = id.wrapping_add(c.0 .0);
-    //                c
-    //            })
-    //            .collect();
-    //        ComponentTypeSet {
-    //            ptr: Arc::new(set),
-    //            id,
-    //        }
-    //    }
-    //}
-
-    #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    enum ComponentDelta {
-        Add(ComponentType),
-        Rem(ComponentType),
-    }
 
     pub struct Family {
         components_set: ComponentTypeSet,
@@ -1403,19 +1272,19 @@ pub mod reckoning {
         }
     } // transfer ======================================================================
 
-    pub trait GetAsRefType<'db, S: SelectOne<'db>, R> {
+    pub trait GetAsRefType<'db, S: crate::transform::SelectOne<'db>, R> {
         unsafe fn get_as_ref_type(&self, index: usize) -> Option<R>;
     }
     
     // Type system gymnastics
-    impl<'db, S: SelectOne<'db>> GetAsRefType<'db, S, &'db S::Type> for *mut Vec<<S as SelectOne<'db>>::Type>
+    impl<'db, S: crate::transform::SelectOne<'db>> GetAsRefType<'db, S, &'db S::Type> for *mut Vec<<S as crate::transform::SelectOne<'db>>::Type>
     {
         unsafe fn get_as_ref_type(&self, index: usize) -> Option<&'db S::Type> {
             (**self).get(index)
         }
     }
 
-    impl<'db, S: SelectOne<'db>> GetAsRefType<'db, S, &'db mut S::Type> for *mut Vec<<S as SelectOne<'db>>::Type>
+    impl<'db, S: crate::transform::SelectOne<'db>> GetAsRefType<'db, S, &'db mut S::Type> for *mut Vec<<S as crate::transform::SelectOne<'db>>::Type>
     {
         unsafe fn get_as_ref_type(&self, index: usize) -> Option<&'db mut S::Type> {
             (**self).get_mut(index)
@@ -1430,18 +1299,17 @@ pub mod reckoning {
     /// selections of data in an [super::EntityDatabase]
     #[macro_use]
     pub mod macros {
-
         #[macro_export]
         macro_rules! impl_transformations {
             ($([$t:ident, $i:tt]),*) => {
                 #[allow(unused_parens)]
-                impl<'db, $($t),+> Iterator for RowIter<'db, ($($t),+)>
+                impl<'db, $($t),+> Iterator for crate::transform::RowIter<'db, ($($t),+)>
                 where
                     $(
-                        $t: MetaData,
-                        $t: SelectOne<'db>,
-                        <$t as SelectOne<'db>>::Type: Component,
-                        *mut Vec<$t::Type>: crate::database::reckoning::GetAsRefType<'db, $t, <$t as SelectOne<'db>>::Ref>,
+                        $t: crate::transform::MetaData,
+                        $t: crate::transform::SelectOne<'db>,
+                        <$t as crate::transform::SelectOne<'db>>::Type: crate::components::Component,
+                        *mut Vec<$t::Type>: crate::database::reckoning::GetAsRefType<'db, $t, <$t as crate::transform::SelectOne<'db>>::Ref>,
                     )+
                 {
                     type Item = ($($t::Ref,)+);
@@ -1461,7 +1329,7 @@ pub mod reckoning {
                                     let (_, pointer): &(crate::borrowed::RawBorrow, std::ptr::NonNull<std::os::raw::c_void>) = self.borrows.get_unchecked(self.table_index + $i);
                                     let casted: std::ptr::NonNull<Vec<$t::Type>> = pointer.cast::<Vec<$t::Type>>();
                                     let raw: *mut Vec<$t::Type> = casted.as_ptr();
-                                    if let Some(result) = <*mut Vec<$t::Type> as GetAsRefType<'db, $t, <$t as SelectOne<'db>>::Ref>>::get_as_ref_type(&raw, self.column_index) {
+                                    if let Some(result) = <*mut Vec<$t::Type> as GetAsRefType<'db, $t, <$t as crate::transform::SelectOne<'db>>::Ref>>::get_as_ref_type(&raw, self.column_index) {
                                         result
                                     } else {
                                         self.table_index += 1;
@@ -1477,20 +1345,20 @@ pub mod reckoning {
                 }
                 
                 #[allow(unused_parens)]
-                impl<'db, $($t),+> IntoIterator for crate::database::Rows<'db, ($($t),+)>
+                impl<'db, $($t),+> IntoIterator for crate::transform::Rows<'db, ($($t),+)>
                 where
                     $(
-                        $t: MetaData,
-                        $t: SelectOne<'db>,
-                        <$t as SelectOne<'db>>::Type: Component,
-                        <$t as SelectOne<'db>>::BorrowType: crate::column::BorrowAsRawParts,
-                        crate::column::Column: crate::column::BorrowColumnAs<<$t as SelectOne<'db>>::Type, <$t as SelectOne<'db>>::BorrowType>,
-                        *mut Vec<$t::Type>: crate::database::reckoning::GetAsRefType<'db, $t, <$t as SelectOne<'db>>::Ref>,
+                        $t: crate::transform::MetaData,
+                        $t: crate::transform::SelectOne<'db>,
+                        <$t as crate::transform::SelectOne<'db>>::Type: crate::components::Component,
+                        <$t as crate::transform::SelectOne<'db>>::BorrowType: crate::column::BorrowAsRawParts,
+                        crate::column::Column: crate::column::BorrowColumnAs<<$t as crate::transform::SelectOne<'db>>::Type, <$t as crate::transform::SelectOne<'db>>::BorrowType>,
+                        *mut Vec<$t::Type>: crate::database::reckoning::GetAsRefType<'db, $t, <$t as crate::transform::SelectOne<'db>>::Ref>,
                         $t: 'static,
                     )+
                 {
                     type Item = ($($t::Ref,)+);
-                    type IntoIter = RowIter<'db, ($($t),+)>;
+                    type IntoIter = crate::transform::RowIter<'db, ($($t),+)>;
 
                     fn into_iter(self) -> Self::IntoIter {
                         (&self).into_iter()
@@ -1498,24 +1366,24 @@ pub mod reckoning {
                 }
 
                 #[allow(unused_parens)]
-                impl<'db, $($t),+> IntoIterator for &crate::database::Rows<'db, ($($t),+)>
+                impl<'db, $($t),+> IntoIterator for &crate::transform::Rows<'db, ($($t),+)>
                 where
                     $(
-                        $t: MetaData,
-                        $t: SelectOne<'db>,
-                        <$t as SelectOne<'db>>::Type: Component,
-                        <$t as SelectOne<'db>>::BorrowType: crate::column::BorrowAsRawParts,
-                        *mut Vec<$t::Type>: crate::database::reckoning::GetAsRefType<'db, $t, <$t as SelectOne<'db>>::Ref>,
-                        crate::column::Column: crate::column::BorrowColumnAs<<$t as SelectOne<'db>>::Type, <$t as SelectOne<'db>>::BorrowType>,
+                        $t: crate::transform::MetaData,
+                        $t: crate::transform::SelectOne<'db>,
+                        <$t as crate::transform::SelectOne<'db>>::Type: crate::components::Component,
+                        <$t as crate::transform::SelectOne<'db>>::BorrowType: crate::column::BorrowAsRawParts,
+                        *mut Vec<$t::Type>: crate::database::reckoning::GetAsRefType<'db, $t, <$t as crate::transform::SelectOne<'db>>::Ref>,
+                        crate::column::Column: crate::column::BorrowColumnAs<<$t as crate::transform::SelectOne<'db>>::Type, <$t as crate::transform::SelectOne<'db>>::BorrowType>,
                         $t: 'static,
                     )+
                 {
                     type Item = ($($t::Ref,)+);
-                    type IntoIter = RowIter<'db, ($($t),+)>;
+                    type IntoIter = crate::transform::RowIter<'db, ($($t),+)>;
 
                     fn into_iter(self) -> Self::IntoIter {
                         let db = self.database();
-                        let mut iter = RowIter::<'db, ($($t),+)>::new(db);
+                        let mut iter = crate::transform::RowIter::<'db, ($($t),+)>::new(db);
                         
                         for i in 0..(self.keys.len() / self.width) {
                             let borrows: ($($t::BorrowType,)+) = ($(
@@ -1523,7 +1391,7 @@ pub mod reckoning {
                                     use crate::column::BorrowColumnAs;
                                     let col_idx = (i * self.width) + $i;
                                     let column = db.get_column(self.keys.get_unchecked(col_idx)).expect("expected initialized column for iteration");
-                                    <$t as SelectOne<'db>>::BorrowType::from(column.borrow_column_as())
+                                    <$t as crate::transform::SelectOne<'db>>::BorrowType::from(column.borrow_column_as())
                                 }
                             ,)+);
                             $(
@@ -1540,15 +1408,15 @@ pub mod reckoning {
                 }
                 
                 #[allow(unused_parens)]
-                impl<'a, $($t),+> const crate::database::Selection for ($($t),+)
+                impl<'a, $($t),+> const crate::transform::Selection for ($($t),+)
                 where
                     $(
-                        $t: MetaData,
-                        $t: ~const SelectOne<'a>,
+                        $t: crate::transform::MetaData,
+                        $t: ~const crate::transform::SelectOne<'a>,
                     )+
                 {
-                    const READS: &'static [Option<ComponentType>] = &[$($t::reads(),)+];
-                    const WRITES: &'static [Option<ComponentType>] = &[$($t::writes(),)+];
+                    const READS: &'static [Option<crate::components::ComponentType>] = &[$($t::reads(),)+];
+                    const WRITES: &'static [Option<crate::components::ComponentType>] = &[$($t::writes(),)+];
                 }
             };
         }
@@ -1556,19 +1424,7 @@ pub mod reckoning {
 } // reckoning =========================================================================
 
 // Exports
-pub use crate::conflict;
-pub use crate::conflict::ConflictColor;
-pub use crate::conflict::ConflictGraph;
-pub use crate::conflict::Dependent;
-pub use crate::database::reckoning::Component;
-pub use crate::database::reckoning::ComponentType;
 pub use crate::database::reckoning::EntityDatabase;
-pub use crate::transform;
-pub use crate::transform::MetaData;
-pub use crate::transform::RowIter;
-pub use crate::transform::Rows;
-pub use crate::transform::SelectOne;
-pub use crate::transform::Selection;
 
 // Macro Impl's
 impl_transformations!([A, 0]);

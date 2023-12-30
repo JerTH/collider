@@ -6,12 +6,9 @@ use std::{
 
 use crate::{
     borrowed::{BorrowError, BorrowRef, BorrowRefMut, BorrowSentinel, RawBorrow},
-    database::{
-        reckoning::{AnyPtr, DbError},
-        Component, ComponentType,
-    },
+    database::reckoning::{AnyPtr, DbError},
     id::{StableTypeId, CommutativeId, FamilyId},
-    EntityId,
+    EntityId, components::{Component, ComponentType},
 };
 
 pub struct RawColumnRef<C: Component> {
