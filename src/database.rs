@@ -21,7 +21,7 @@ pub mod reckoning {
     // collections
     use std::collections::BTreeSet;
     use std::collections::HashMap;
-
+    
     // crate
     use crate::column::Column;
     use crate::column::ColumnHeader;
@@ -41,7 +41,6 @@ pub mod reckoning {
     use dashmap::mapref::one::Ref as DashMapRef;
     use dashmap::mapref::one::RefMut as DashMapRefMut;
     use itertools::Itertools;
-    use tracing::trace;
     use transfer::TransferGraph;
 
     use super::SelectOne;

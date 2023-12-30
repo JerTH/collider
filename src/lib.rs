@@ -19,5 +19,6 @@ pub mod table;
 pub mod transform;
 pub mod conflict;
 pub mod database;
+pub mod indexing;
 
 pub use id::EntityId;
