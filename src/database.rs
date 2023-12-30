@@ -37,7 +37,11 @@ pub mod reckoning {
     pub(crate) type AnyPtr = Box<dyn Any>;
 
     use dashmap::DashMap;
+    use dashmap::try_result::TryResult as DashMapTryResult;
+    use dashmap::mapref::one::Ref as DashMapRef;
+    use dashmap::mapref::one::RefMut as DashMapRefMut;
     use itertools::Itertools;
+    use tracing::trace;
     use transfer::TransferGraph;
 
     use super::SelectOne;
@@ -177,6 +181,7 @@ pub mod reckoning {
     /// strategy is to cache and record all of the informaiton about
     /// families at their creation, and then use that information to
     /// accelerate interactions with the [EntityDatabase]
+    #[derive(Debug)]
     pub struct DbMaps {
         component_group_to_family: RwLock<HashMap<ComponentTypeSet, FamilyId>>,
         entity_to_owning_family: RwLock<HashMap<EntityId, FamilyId>>,
@@ -391,6 +396,7 @@ pub mod reckoning {
         }
     }
 
+    #[derive(Debug)]
     pub struct EntityAllocator {
         count: AtomicU32,
         free: Mutex<Vec<EntityId>>,
@@ -547,6 +553,7 @@ pub mod reckoning {
         }
     }
 
+    #[derive(Debug)]
     pub struct EntityDatabase {
         allocator: EntityAllocator,
 
@@ -565,6 +572,7 @@ pub mod reckoning {
         /// types of columns we've already built
         headers: Arc<DashMap<ComponentType, ColumnHeader>>,
     }
+
     pub(crate) type ColumnMapRef<'db> = dashmap::mapref::one::Ref<'db, ColumnKey, Column>;
     pub(crate) type ColumnMapRefMut<'db> = dashmap::mapref::one::RefMut<'db, ColumnKey, Column>;
 
@@ -573,6 +581,8 @@ pub mod reckoning {
     impl EntityDatabase {
         /// Creates a new [EntityDatabase]
         pub fn new() -> Self {
+            tracing::info!("constructing new entity database");
+
             let db = Self {
                 allocator: EntityAllocator::new(),
                 tables: Arc::new(DashMap::new()),
@@ -593,18 +603,37 @@ pub mod reckoning {
         }
 
         pub(crate) fn get_column(&self, key: &ColumnKey) -> Option<ColumnMapRef> {
+            tracing::trace!(%key, "IMMUTABLE COLUMN ACCESS");
             self.columns.get(key)
         }
 
         pub(crate) fn get_column_mut(&self, key: &ColumnKey) -> Option<ColumnMapRefMut> {
+            tracing::trace!(%key, "⚠MUTABLE COLUMN ACCESS⚠");
             self.columns.get_mut(key)
+        }
+
+        pub(crate) fn insert_column(&self, key: ColumnKey, column: Column) {
+            tracing::trace!(%key, "⚠MUTABLE COLUMN ACCESS⚠");
+            self.columns.insert(key, column);
+        }
+
+        pub(crate) fn contains_column(&self, key: &ColumnKey) -> bool {
+            self.columns.contains_key(key)
+        }
+
+        fn try_get_column(&self, key: &ColumnKey) -> DashMapTryResult<DashMapRef<ColumnKey, Column>> {
+            return self.columns.try_get(key)
+        }
+
+        fn try_get_column_mut(&self, key: &ColumnKey) -> DashMapTryResult<DashMapRefMut<ColumnKey, Column>> {
+            return self.columns.try_get_mut(key)
         }
 
         pub(crate) fn get_table(&self, family: &FamilyId) -> Option<TableMapRef> {
             self.tables.get(family)
         }
-
-        pub fn update_mapping<'db, K: Clone + Eq + Hash + 'db, V: Clone + 'db>(
+        
+        pub fn update_mapping<'db, K: Debug + Clone + Eq + Hash + 'db, V: Debug + Clone + 'db>(
             &'db self,
             key: &'db K,
             value: &'db V,
@@ -612,6 +641,12 @@ pub mod reckoning {
         where
             DbMaps: GetDbMap<'db, (K, V)>,
         {
+            //tracing::trace!(
+            //    k = ?key,
+            //    v = ?value,
+            //    "updating mapping"
+            //);
+            
             let mut guard = self
                 .maps
                 .mut_map::<(K, V)>()
@@ -621,13 +656,19 @@ pub mod reckoning {
             Ok(())
         }
 
-        pub fn delete_mapping<'db, K: Clone + Eq + Hash + 'db, V: Clone + 'db>(
+        pub fn delete_mapping<'db, K: Debug + Clone + Eq + Hash + 'db, V: Debug + Clone + 'db>(
             &'db self,
             key: &'db K,
         ) -> Result<(), DbError>
         where
             DbMaps: GetDbMap<'db, (K, V)>,
         {
+            tracing::trace!(
+                k = ?key,
+                v_type = std::any::type_name::<V>(),
+                "deleting mapping"
+            );
+
             let mut guard = self
                 .maps
                 .mut_map::<(K, V)>()
@@ -646,6 +687,8 @@ pub mod reckoning {
 
         /// Creates an entity, returning its [EntityId]
         pub fn create(&self) -> Result<EntityId, CreateEntityError> {
+            let _trace_span = tracing::span!(tracing::Level::DEBUG, "creating entity").entered();
+
             let entity = self
                 .allocator
                 .alloc()
@@ -657,7 +700,9 @@ pub mod reckoning {
                     .ok_or(CreateEntityError::DbError(
                         DbError::FailedToFindFamilyForSet(unit_family_set.clone()),
                     ))?;
-
+            
+            tracing::trace!(entity_id = ?entity, family_id = ?family);
+            
             // add the entity to the unit/null family
             self.update_mapping(&entity, &family)?;
             self.initialize_row_in(&entity, &family)?;
@@ -711,15 +756,20 @@ pub mod reckoning {
 
         
         fn build_typed_column_for_family(&self, family: FamilyId, ty: &ComponentType) -> Result<dashmap::mapref::one::RefMut<'_, ColumnKey, Column>, DbError> {
+            let _trace_span = tracing::span!(tracing::Level::TRACE, "build_typed_column_for_family").entered();
+            
             if let Some(header) = self.headers.get(ty) {
                 let column_header = header.clone();
                 let component_type = ComponentType::from(column_header.stable_type_id());
                 let column_key = ColumnKey::from((family, component_type));
                 let column_inner = (column_header.fn_constructor)();
                 let column = Column::new(column_header.clone(), column_inner);
-                self.columns.insert(column_key, column);
                 
-                Ok(self.columns.get_mut(&column_key).expect("expect just-created column"))
+                { // guard scope
+                    self.insert_column(column_key, column);
+                }
+                
+                Ok(self.get_column_mut(&column_key).expect("expect just-created column"))
             } else {
                 unimplemented!("lazy init columns?");
             }
@@ -739,6 +789,8 @@ pub mod reckoning {
             entity: &EntityId,
             family: &FamilyId,
         ) -> Result<usize, DbError> {
+            let _trace_span = tracing::span!(tracing::Level::TRACE, "initialize_row_in").entered();
+
             let mut table = self
                 .tables
                 .get_mut(family)
@@ -750,12 +802,11 @@ pub mod reckoning {
                 },
                 TableResult::EntityInserted(index) => {
                     for (ty, key) in table.column_map() {
-                        if let Some(_) = self.columns.get_mut(key) {
-                            //assert_eq!(index, column.instance(entity)?);
-                        } else {
-                            let _ = self.build_typed_column_for_family(*family, ty)?;
-                            //assert_eq!(index, column.instance(entity)?);
-                        }
+                        if !self.contains_column(key) {
+                            let column_ref = self.build_typed_column_for_family(*family, ty)?;
+                            
+                            drop(column_ref)
+                        } 
                     }
                     return Ok(index)
                 },
@@ -763,7 +814,6 @@ pub mod reckoning {
                     return Err(e)
                 },
             }
-        
         }
 
         /// Adds a [Component] to an entity, moving it from one family to another
@@ -775,17 +825,25 @@ pub mod reckoning {
             entity: EntityId,
             component: C,
         ) -> Result<(), DbError> {
+            let _trace_span = tracing::span!(tracing::Level::DEBUG, "add_component").entered();
+            tracing::trace!(entity_id = ?entity, component = ?component);
+
             StableTypeId::register_debug_info::<C>();
 
-            let delta = ComponentDelta::Add(ComponentType::of::<C>());
-            let new_family = self.find_new_family(&entity, &delta)?;
+            let family = self
+                .maps
+                .get_map::<(EntityId, FamilyId)>(&entity)
+                .ok_or(DbError::EntityDoesntExist(entity))?;
 
-            if self.query_mapping(&entity) == Some(new_family) {
-                self.set_component_for(&entity, component)?;
-            } else {
+            let delta = ComponentDelta::Add(ComponentType::of::<C>());
+            let new_family = self.find_new_family(&family, &delta)?;
+
+            if !(family == new_family) {
                 self.resolve_entity_transfer(&entity, &new_family)?;
-                self.set_component_for(&entity, component)?;
             }
+
+            self.set_component_for(&entity, component)?;
+            
             Ok(())
         }
 
@@ -829,17 +887,24 @@ pub mod reckoning {
         /// a component addition or removal
         fn find_new_family(
             &self,
-            entity: &EntityId,
+            family: &FamilyId,
             delta: &ComponentDelta,
         ) -> Result<FamilyId, DbError> {
-            let family = self
-                .maps
-                .get_map::<(EntityId, FamilyId)>(entity)
-                .ok_or(DbError::EntityDoesntExist(*entity))?;
+            let _trace_span = tracing::span!(tracing::Level::TRACE, "find_new_family").entered();
 
             match delta {
-                ComponentDelta::Add(component) => self.family_after_add(&family, component),
-                ComponentDelta::Rem(component) => self.family_after_remove(&family, component),
+                ComponentDelta::Add(component) => {
+                    if let Some(components) = self.query_mapping::<FamilyId, ComponentTypeSet>(&family) {
+                        if components.contains(component) {
+                            return Ok(*family)
+                        }
+                    }
+
+                    return self.family_after_add(&family, component);
+                },
+                ComponentDelta::Rem(component) => {
+                    return self.family_after_remove(&family, component)
+                },
             }
         }
 
@@ -848,6 +913,8 @@ pub mod reckoning {
             curr_family: &FamilyId,
             new_component: &ComponentType,
         ) -> Result<FamilyId, DbError> {
+            let _trace_span = tracing::span!(tracing::Level::TRACE, "family_after_add").entered();
+
             // First try and find an already cached edge on the transfer graph for this family
             if let Some(transfer::Edge::Add(family_id)) =
                 self.query_transfer_graph(curr_family, new_component)
@@ -863,7 +930,6 @@ pub mod reckoning {
                     return Ok(*curr_family);
                 } else {
                     let new_components_iter = components.iter().cloned().chain([*new_component]);
-
                     let new_components = ComponentTypeSet::from(new_components_iter);
 
                     let family = match self
@@ -871,19 +937,24 @@ pub mod reckoning {
                         .get_map::<(ComponentTypeSet, FamilyId)>(&new_components)
                     {
                         Some(family) => family,
+
+                        // Create a new family for this unique set of components
                         None => self.new_family(new_components)?,
                     };
+
 
                     self.update_transfer_graph(
                         curr_family,
                         new_component,
                         transfer::Edge::Add(family),
                     )?;
+
                     self.update_transfer_graph(
                         &family,
                         new_component,
                         transfer::Edge::Remove(*curr_family),
                     )?;
+
 
                     Ok(family)
                 }
@@ -902,6 +973,9 @@ pub mod reckoning {
 
         /// Creates a new family, sets up the default db mappings for the family
         fn new_family(&self, components: ComponentTypeSet) -> Result<FamilyId, DbError> {
+            let _trace_span = tracing::span!(tracing::Level::TRACE, "new_family").entered();
+
+
             let family_id = FamilyId::from_iter(components.iter());
             let mut headers: Vec<ColumnHeader> = Vec::with_capacity(components.len());
 
@@ -909,19 +983,24 @@ pub mod reckoning {
                 if let Some(header) = self.headers.get(ty) {
                     headers.push(header.clone());
                 } else {
+                    // some other header init process?
                 }
             });
 
             let mut table = Table::new(family_id, components.clone());
+            {
+                headers.iter().for_each(|header| {
+                    let component_type = ComponentType::from(header.stable_type_id());
+                    let column_inner = (header.fn_constructor)();
+                    let column = Column::new(header.clone(), column_inner);
+                    let column_key = ColumnKey::from((family_id, component_type));
 
-            headers.iter().for_each(|header| {
-                let component_type = ComponentType::from(header.stable_type_id());
-                let column_inner = (header.fn_constructor)();
-                let column = Column::new(header.clone(), column_inner);
-                let column_key = ColumnKey::from((family_id, component_type));
-                self.columns.insert(column_key, column);
-                table.update_column_map(component_type, column_key);
-            });
+                    tracing::trace!(%column_key, "creating new column");
+
+                    self.insert_column(column_key, column);
+                    table.update_column_map(component_type, column_key);
+                });
+            }
 
             self.tables.insert(family_id, table);
 
@@ -929,39 +1008,39 @@ pub mod reckoning {
             self.update_mapping(&family_id, &components)?;
             self.update_mapping(&family_id, &TransferGraph::new())?;
 
-            let mut guard = self
-                .maps
-                .mut_map::<(ComponentType, FamilyIdSet)>()
-                .ok_or(DbError::FailedToAcquireMapping)?;
+            {
+                let mut guard = self
+                    .maps
+                    .mut_map::<(ComponentType, FamilyIdSet)>()
+                    .ok_or(DbError::FailedToAcquireMapping)?;
 
-            // We map each component type to the set of families which contain it
-            components.iter().for_each(|component_type| {
-                guard
-                    .entry(*component_type)
-                    .and_modify(|set| set.insert(family_id))
-                    .or_insert(FamilyIdSet::from(&[family_id]));
-            });
-            
-            drop(guard); // release lock
+                // We map each component type to the set of families which contain it
+                components.iter().for_each(|component_type| {
+                    guard
+                        .entry(*component_type)
+                        .and_modify(|set| set.insert(family_id))
+                        .or_insert(FamilyIdSet::from(&[family_id]));
+                });
+            }
             
             // Here we map every unique subset of our component set to this family
             // This results in 2^n unique mappings. These mappings are used by queries
             // to string together all of the columns necessary for row iteration.
             // In the future, we might want to intoduce a lazier mechanism for this,
             // or a way to trim unused mappings
-            let mut guard = self
-                .maps
-                .mut_map::<(ComponentTypeSet, FamilyIdSet)>()
-                .ok_or(DbError::FailedToAcquireMapping)?;
+            {
+                let mut guard = self
+                    .maps
+                    .mut_map::<(ComponentTypeSet, FamilyIdSet)>()
+                    .ok_or(DbError::FailedToAcquireMapping)?;
 
-            for subset in components.power_set() {
-                guard
-                    .entry(subset)
-                    .and_modify(|set| set.insert(family_id))
-                    .or_insert(FamilyIdSet::from(&[family_id]));
+                for subset in components.power_set() {
+                    guard
+                        .entry(subset)
+                        .and_modify(|set| set.insert(family_id))
+                        .or_insert(FamilyIdSet::from(&[family_id]));
+                }
             }
-
-            drop(guard);
 
             Ok(family_id)
         }
@@ -1016,6 +1095,11 @@ pub mod reckoning {
             from_family: &FamilyId,
             dest_family: &FamilyId,
         ) -> Result<(), DbError> {
+            let _trace_span = tracing::span!(tracing::Level::TRACE, "move_components").entered();
+
+            //let _trace_span = tracing::span!(tracing::Level::DEBUG, "moving components").entered();
+            //tracing::trace!(entity_id = ?entity, from = ?from_family, dest = ?dest_family);
+
             let from_table = self
                 .tables
                 .get(from_family)
@@ -1031,41 +1115,65 @@ pub mod reckoning {
                 .get(entity)
                 .ok_or(DbError::EntityNotInTable(*entity, *from_family))?;
 
+            tracing::trace!(index = from_index, "acquired table references + from table index");
+            
             // assume the move will fail, update this if it succeeds
             let mut move_result: Result<ColumnMoveResult, DbError> = Err(DbError::ColumnDoesntExistInTable);
             
             for (ty, from_key) in from_table.column_map().iter() {
-                let from_col = self.get_column_mut(from_key);
-                let dest_col = dest_table
-                    .column_map()
-                    .get(ty)
-                    .and_then(|key| self.get_column_mut(key));
+                let _tracing_span = tracing::span!(tracing::Level::TRACE, "moving component", ?ty).entered();
+
+                let dest_key = match dest_table.column_map().get(ty) {
+                    Some(key) => key,
+                    None => { continue }
+                };
+
+                debug_assert_ne!(from_key, dest_key);
                 
-                match (from_col, dest_col) {
-                    (Some(mut from), Some(mut dest)) => {
-                        let pending_move_result = from.move_component_to(&mut dest, from_index);
-                        
-                        if move_result.is_ok() && pending_move_result.is_err() {
-                            panic!("data column state corrupted")
-                        } else {
-                            move_result = pending_move_result;
-                        }
-                    }
-                    (None, None) => {
-                        unimplemented!()
-                    }
-                    (None, Some(_)) => {
-                        unimplemented!()
-                    }
-                    (Some(_), None) => {
-                        unimplemented!()
-                    }
+                let from_col = match self.try_get_column(from_key) {
+                    DashMapTryResult::Present(column) => column,
+                    DashMapTryResult::Absent => {
+                        tracing::trace!(%from_key, %dest_key, "source column doesn't exist");
+                        continue;
+                    },
+                    DashMapTryResult::Locked => {
+                        tracing::trace!(%from_key, %dest_key, "source column already locked");
+                        panic!();
+                    },
+                };
+
+                let dest_col = match self.try_get_column(dest_key) {
+                    DashMapTryResult::Present(column) => column,
+                    DashMapTryResult::Absent => {
+                        tracing::trace!(%from_key, %dest_key, "destination column doesn't exist");
+                        continue;
+                    },
+                    DashMapTryResult::Locked => {
+                        tracing::trace!(%from_key, %dest_key, "destination column already locked");
+                        panic!();
+                    },
+                };
+
+                let pending_move_result = from_col.move_component_to(&dest_col, from_index);
+                tracing::trace!("pending move result: {:?}", pending_move_result);
+
+                if let Some(e) = pending_move_result.as_ref().err() {
+                    tracing::warn!("warning - {}", e);
+                }
+
+                if move_result.is_ok() && pending_move_result.is_err() {
+                    tracing::error!("data column state out of sync");
+                    panic!("data column state out of sync")
+                } else {
+                    move_result = pending_move_result;
                 }
             }
             
             // if the move succeeded, patch the tables bookkeeping with the results of the move
             match move_result {
                 Ok(ColumnMoveResult::SwapMoved { moved, new_moved_index, swapped, .. }) => {
+                    tracing::trace!(?moved, ?new_moved_index, ?swapped, "swap move");
+
                     from_table.entity_map().insert(swapped, from_index);
                     from_table.entity_map().remove(&moved);
                     dest_table.entity_map().insert(moved, new_moved_index);
@@ -1074,6 +1182,8 @@ pub mod reckoning {
                     return Ok(())
                 },
                 Ok(ColumnMoveResult::Moved { moved, new_moved_index }) => {
+                    tracing::trace!(?moved, ?new_moved_index, "moved");
+
                     dest_table.entity_map().insert(moved, new_moved_index);
                     from_table.entity_map().remove(&moved);
                     
@@ -1081,6 +1191,8 @@ pub mod reckoning {
                     return Ok(())
                 },
                 Ok(ColumnMoveResult::NoMove) => {
+                    tracing::trace!("no move");
+
                     return Ok(())
                 },
                 Err(e) => {
@@ -1097,11 +1209,16 @@ pub mod reckoning {
             entity: &EntityId,
             dest_family: &FamilyId,
         ) -> Result<(), DbError> {
+            let _trace_span = tracing::span!(tracing::Level::TRACE, "resolve_entity_transfer").entered();
+
+            //let _trace_span = tracing::span!(tracing::Level::DEBUG, "resolving entity transfer").entered();
+            //tracing::trace!(entity_id = ?entity, dest = ?dest_family);
+
             let from_family: FamilyId = self
                 .query_mapping(entity)
                 .ok_or(DbError::EntityDoesntExist(*entity))?;
 
-            self.initialize_row_in(entity, dest_family)?;
+            let _ = self.initialize_row_in(entity, dest_family)?;
 
             match self.move_components(entity, &from_family, dest_family) {
                 Ok(_) => {},
@@ -1126,6 +1243,9 @@ pub mod reckoning {
             entity: &EntityId,
             component: C,
         ) -> Result<(), DbError> {
+            let _trace_span = tracing::span!(tracing::Level::TRACE, "set_component_for").entered();
+
+
             let family: FamilyId = self
                 .query_mapping(entity)
                 .ok_or(DbError::EntityDoesntExist(*entity))?;
@@ -1156,13 +1276,16 @@ pub mod reckoning {
             // if/when it does exist, we instantiate space within it for our entity
             match opt_has_column_key {
                 Some(column_key) => {
-                    self.columns
-                        .get_mut(&column_key)
+                    let _trace_span = tracing::span!(tracing::Level::TRACE, "opt_has_column_key:SOME").entered();
+
+                    self.get_column_mut(&column_key)
                         .ok_or(DbError::ColumnDoesntExistInTable)?
                         .set_component(entity, index, component)?;
                 },
-                
+
                 None => {
+                    let _trace_span = tracing::span!(tracing::Level::TRACE, "opt_has_column_key:NONE").entered();
+
                     let mut table = self
                         .tables
                         .get_mut(&family)
@@ -1208,7 +1331,7 @@ pub mod reckoning {
 
                     write!(f, "{}\n", *item)?;
                     for (ty, key) in item.column_map().iter() {
-                        match self.columns.get(key) {
+                        match self.get_column(key) {
                             Some(column) => {
                                 write!(f, "{}", *column)?;
                             }
@@ -1243,7 +1366,7 @@ pub mod reckoning {
         use std::sync::Arc;
         use std::sync::RwLock;
 
-        #[derive(Clone)]
+        #[derive(Debug, Clone)]
         pub struct TransferGraph {
             links: Arc<RwLock<HashMap<ComponentType, Edge>>>,
         }
@@ -1274,7 +1397,7 @@ pub mod reckoning {
             }
         }
 
-        #[derive(Clone)]
+        #[derive(Debug, Clone)]
         pub enum Edge {
             Add(FamilyId),
             Remove(FamilyId),

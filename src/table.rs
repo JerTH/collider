@@ -16,6 +16,7 @@ use crate::{
     EntityId,
 };
 
+#[derive(Debug)]
 pub struct Table {
     family: FamilyId,
     components: ComponentTypeSet,

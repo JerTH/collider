@@ -6,6 +6,8 @@ use collider::{
     transform::{Transformation, Write},
     *,
 };
+use tracing::trace;
+use tracing_subscriber::fmt::format::FmtSpan;
 
 #[allow(dead_code)]
 #[allow(unused_assignments)]
@@ -169,10 +171,23 @@ impl Transformation for PrintVehicleStatus {
     }
 }
 
-#[test]
-fn vehicle_example() {
+fn enable_tracing() {
+    print!("\n");
     std::env::set_var("RUST_BACKTRACE", "1");
 
+    let subscriber = tracing_subscriber::FmtSubscriber::builder()
+        .with_max_level(tracing::Level::INFO)
+        .with_span_events(FmtSpan::CLOSE)
+        .finish();
+
+    tracing::subscriber::set_global_default(subscriber).expect("setting global subscriber failed");
+    trace!("tracing enabled")
+}
+
+#[test]
+fn vehicle_example() {
+    enable_tracing();
+    
     let mut db = EntityDatabase::new();
 
     // Define some components from data, these could be loaded from a file
@@ -238,10 +253,8 @@ fn vehicle_example() {
     db.add_component(pickup_truck, diesel_engine).unwrap();
 
     let economy_car = db.create().unwrap();
-    db.add_component(economy_car, economy_engine.clone())
-        .unwrap();
-    db.add_component(economy_car, cheap_chassis.clone())
-        .unwrap();
+    db.add_component(economy_car, economy_engine.clone()).unwrap();
+    db.add_component(economy_car, cheap_chassis.clone()).unwrap();
     db.add_component(economy_car, five_speed.clone()).unwrap();
 
     // Lets name the 3 vehicles
@@ -278,7 +291,7 @@ fn vehicle_example() {
     race.add_transformation(WheelPhysics);
     race.add_transformation(DriverInput);
     race.add_transformation(PrintVehicleStatus);
-
+    
     // The simulation loop. Here we can see that, fundamentally, the
     // simulation is nothing but a set of transformations on our
     // dataset run over and over. By adding more components and
@@ -296,7 +309,7 @@ fn vehicle_example() {
             }
         }
 
-        if loops < 3 {
+        if loops < 100 {
             loops += 1;
         } else {
             println!("Exiting!");

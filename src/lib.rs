@@ -18,21 +18,6 @@ pub mod column;
 pub mod table;
 pub mod transform;
 pub mod conflict;
+pub mod database;
 
-//pub(crate) mod db;
-//pub(crate) mod comps;
-//pub(crate) mod family;
-//pub(crate) mod xform;
-
-pub mod database; // replaces db
-
-//pub use db::EntityDatabase;
 pub use id::EntityId;
-//pub use comps::Component;
-//pub use xform::Read;
-//pub use xform::Write;
-//pub use xform::Phase;
-//pub use xform::Transformation;
-//pub use xform::TransformError;
-//pub use xform::TransformSuccess;
-//pub use xform::TransformResult;

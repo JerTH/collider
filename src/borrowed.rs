@@ -67,6 +67,8 @@ impl BorrowRef {
     /// Ascends the immutable borrow into a mutable borrow, ONLY IF 
     /// this is the only existing immutable borrow
     pub fn ascend(self) -> BorrowRefMut {
+        tracing::debug!("ascending runtime borrow reference");
+
         let cur = self.sentinel.load(Ordering::SeqCst);
         let new = MUTABLE_BORROW;
         

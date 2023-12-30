@@ -5,8 +5,8 @@
 
 use crate::borrowed::RawBorrow;
 use crate::column::ColumnKey;
-use crate::column::ColumnRef;
-use crate::column::ColumnRefMut;
+use crate::column::RawColumnRef;
+use crate::column::RawColumnRefMut;
 use crate::database::ComponentType;
 use crate::conflict::ConflictGraph;
 use crate::conflict::Dependent;
@@ -290,7 +290,7 @@ where
 {
     type Ref = &'db Self::Type;
     type Type = C;
-    type BorrowType = ColumnRef<C>;
+    type BorrowType = RawColumnRef<C>;
 
     fn reads() -> Option<ComponentType> {
         Some(ComponentType::of::<Self::Type>())
@@ -304,7 +304,7 @@ where
 {
     type Ref = &'db mut Self::Type;
     type Type = C;
-    type BorrowType = ColumnRefMut<C>;
+    type BorrowType = RawColumnRefMut<C>;
 
     fn writes() -> Option<ComponentType> {
         Some(ComponentType::of::<Self::Type>())

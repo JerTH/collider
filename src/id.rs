@@ -260,6 +260,10 @@ impl CommutativeId {
     fn non_zero(&self) -> bool {
         !(self.0 == 0)
     }
+
+    pub fn raw(&self) -> u64 {
+        self.0
+    }
 }
 
 impl From<(FamilyId, ComponentType)> for CommutativeId {

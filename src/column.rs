@@ -1,7 +1,7 @@
 use std::{
     cell::UnsafeCell,
     fmt::Display,
-    ptr::NonNull, any::Any,
+    ptr::NonNull, any::Any, collections::HashMap, sync::{RwLockWriteGuard, RwLockReadGuard, RwLock, TryLockError}, ops::{Deref, DerefMut},
 };
 
 use crate::{
@@ -14,19 +14,19 @@ use crate::{
     EntityId,
 };
 
-pub struct ColumnRef<C: Component> {
+pub struct RawColumnRef<C: Component> {
     borrow: BorrowRef,
     ptr_entity_map: NonNull<Vec<EntityId>>,
     ptr_components: NonNull<Vec<C>>,
 }
 
-impl<'b, C: Component> ColumnRef<C> {
+impl<'b, C: Component> RawColumnRef<C> {
     pub fn new(borrow: BorrowRef, ptr_components: NonNull<Vec<C>>, ptr_entity_map: NonNull<Vec<EntityId>>) -> Self {
         Self { borrow, ptr_components, ptr_entity_map }
     }
 
-    pub fn ascend(self) -> ColumnRefMut<C> {
-        ColumnRefMut {
+    pub fn ascend(self) -> RawColumnRefMut<C> {
+        RawColumnRefMut {
             borrow: self.borrow.ascend(),
             ptr_entity_map: self.ptr_entity_map,
             ptr_components: self.ptr_components,
@@ -43,19 +43,19 @@ impl<'b, C: Component> ColumnRef<C> {
 //    }
 //}
 
-pub struct ColumnRefMut<C> {
+pub struct RawColumnRefMut<C> {
     borrow: BorrowRefMut,
     ptr_entity_map: NonNull<Vec<EntityId>>,
     ptr_components: NonNull<Vec<C>>,
 }
 
-impl<'b, C: Component> From<ColumnRef<C>> for ColumnRefMut<C> {
-    fn from(value: ColumnRef<C>) -> Self {
+impl<'b, C: Component> From<RawColumnRef<C>> for RawColumnRefMut<C> {
+    fn from(value: RawColumnRef<C>) -> Self {
         value.ascend()
     }
 }
 
-impl<C: Component> ColumnRefMut<C> {
+impl<C: Component> RawColumnRefMut<C> {
     pub fn new(borrow: BorrowRefMut, ptr_components: NonNull<Vec<C>>, ptr_entity_map: NonNull<Vec<EntityId>>) -> Self {
         Self { borrow, ptr_components, ptr_entity_map }
     }
@@ -109,7 +109,7 @@ impl<C: Component> ColumnRefMut<C> {
             },
             _ => {
                 let (removed, removed_id) = (from_components.swap_remove(index), from_entity_map.swap_remove(index));
-
+                
                 let swapped = *from_entity_map.get_unchecked(index);
                 let new_swapped_index = index;
 
@@ -177,6 +177,12 @@ pub const COLUMN_LENGTH_MAXIMUM: usize = 2048; // 16384
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ColumnKey(CommutativeId);
 
+impl ColumnKey {
+    fn raw(&self) -> u64 {
+        self.0.raw()
+    }
+}
+
 /// Combines a family ID and a type id into a column key
 /// Each family can have exactly one column of a given type
 impl From<(FamilyId, ComponentType)> for ColumnKey {
@@ -185,7 +191,13 @@ impl From<(FamilyId, ComponentType)> for ColumnKey {
     }
 }
 
-/// A header describing a certain typed column. Stores the necessary functions
+impl Display for ColumnKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "COL_{:#X}", self.raw())
+    }
+}
+
+/// A header describing a specific typed column. Holds the necessary functions
 /// to construct a column of its own type and interact with it, and other
 /// meta data associated with the column
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq)]
@@ -216,7 +228,7 @@ pub trait BorrowAsRawParts {
     unsafe fn borrow_as_raw_parts(self) -> (RawBorrow, NonNull<std::os::raw::c_void>);
 }
 
-impl<C: Component> BorrowAsRawParts for ColumnRef<C> {
+impl<C: Component> BorrowAsRawParts for RawColumnRef<C> {
     unsafe fn borrow_as_raw_parts(self) -> (RawBorrow, NonNull<std::os::raw::c_void>) {
         let ptr = self.ptr_components.as_ptr() as *mut std::os::raw::c_void;
         let non_null = NonNull::new(ptr)
@@ -226,7 +238,7 @@ impl<C: Component> BorrowAsRawParts for ColumnRef<C> {
     }
 }
 
-impl<C: Component> BorrowAsRawParts for ColumnRefMut<C> {
+impl<C: Component> BorrowAsRawParts for RawColumnRefMut<C> {
     unsafe fn borrow_as_raw_parts(self) -> (RawBorrow, NonNull<std::os::raw::c_void>) {
         let ptr = self.ptr_components.as_ptr() as *mut std::os::raw::c_void;
         let non_null = NonNull::new(ptr)
@@ -240,14 +252,14 @@ pub trait BorrowColumnAs<C, R> {
     fn borrow_column_as(&self) -> R;
 }
 
-impl<C: Component> BorrowColumnAs<C, ColumnRef<C>> for Column {
-    fn borrow_column_as(&self) -> ColumnRef<C> {
+impl<C: Component> BorrowColumnAs<C, RawColumnRef<C>> for Column {
+    fn borrow_column_as(&self) -> RawColumnRef<C> {
         self.get_inner_ref()
     }
 }
 
-impl<C: Component> BorrowColumnAs<C, ColumnRefMut<C>> for Column {
-    fn borrow_column_as(&self) -> ColumnRefMut<C> {
+impl<C: Component> BorrowColumnAs<C, RawColumnRefMut<C>> for Column {
+    fn borrow_column_as(&self) -> RawColumnRefMut<C> {
         self.get_inner_ref().ascend()
     }
 }
@@ -268,11 +280,11 @@ impl<'b> Column {
         Ok((self.header.fn_instance)(&self.data, entity))
     }
 
-    pub(crate) fn get_inner_ref<C: Component>(&'b self) -> ColumnRef<C> {
+    pub(crate) fn get_inner_ref<C: Component>(&'b self) -> RawColumnRef<C> {
         ColumnInner::<C>::downcast_and_borrow(&self.data).expect("expected column access")
     }
 
-    pub(crate) fn get_inner_ref_mut<C: Component>(&'b self) -> ColumnRefMut<C> {
+    pub(crate) fn get_inner_ref_mut<C: Component>(&'b self) -> RawColumnRefMut<C> {
         ColumnInner::<C>::downcast_and_borrow_mut(&self.data).expect("expected column access")
     }
     
@@ -284,7 +296,7 @@ impl<'b> Column {
 
     /// Moves an entity from the given index of this [Column] to the end of `dest` [Column]
     /// Returns the [EntityId] of the *swapped* entity, and the new length of the `dest` column if successful
-    pub(crate) fn move_component_to(&mut self, dest: &mut Self, index: usize) -> Result<ColumnMoveResult, DbError> {
+    pub(crate) fn move_component_to(&self, dest: &Self, index: usize) -> Result<ColumnMoveResult, DbError> {
         (self.header.fn_move)(&self.data, &dest.data, index)
     }
 
@@ -350,32 +362,32 @@ impl<C: Component> Display for ColumnInner<C> {
 }
 
 impl<'b, C: Component> ColumnInner<C> {
-    pub fn borrow_column(&'b self) -> ColumnRef<C> {
+    pub fn borrow_column(&'b self) -> RawColumnRef<C> {
         self.try_borrow()
             .expect("column was already mutably borrowed")
     }
 
-    fn try_borrow(&'b self) -> Result<ColumnRef<C>, BorrowError> {
+    fn try_borrow(&'b self) -> Result<RawColumnRef<C>, BorrowError> {
         match BorrowRef::new(self.borrow.clone()) {
             Some(borrow) => {
                 let ptr_components = unsafe { NonNull::new_unchecked(self.values.get()) };
                 let ptr_entity_map = unsafe { NonNull::new_unchecked(self.entity.get()) };
-                Ok(ColumnRef::new(borrow, ptr_components, ptr_entity_map))
+                Ok(RawColumnRef::new(borrow, ptr_components, ptr_entity_map))
             }
             None => Err(BorrowError::AlreadyBorrowed),
         }
     }
 
-    pub fn borrow_column_mut(&'b self) -> ColumnRefMut<C> {
+    pub fn borrow_column_mut(&'b self) -> RawColumnRefMut<C> {
         self.try_borrow_mut().expect("column was already borrowed")
     }
 
-    fn try_borrow_mut(&'b self) -> Result<ColumnRefMut<C>, BorrowError> {
+    fn try_borrow_mut(&'b self) -> Result<RawColumnRefMut<C>, BorrowError> {
         match BorrowRefMut::new(self.borrow.clone()) {
             Some(borrow) => {
                 let ptr_components = unsafe { NonNull::new_unchecked(self.values.get()) };
                 let ptr_entity_map = unsafe { NonNull::new_unchecked(self.entity.get()) };
-                Ok(ColumnRefMut::new(borrow, ptr_components, ptr_entity_map))
+                Ok(RawColumnRefMut::new(borrow, ptr_components, ptr_entity_map))
             }
             None => Err(BorrowError::AlreadyBorrowed),
         }
@@ -396,14 +408,14 @@ impl<'b, C: Component> ColumnInner<C> {
         raw_ptr_from == raw_ptr_dest
     }
 
-    fn downcast_and_borrow(column: &AnyPtr) -> Result<ColumnRef<C>, DbError> {
+    fn downcast_and_borrow(column: &AnyPtr) -> Result<RawColumnRef<C>, DbError> {
         Ok(column
             .downcast_ref::<ColumnInner<C>>()
             .ok_or(DbError::ColumnTypeDiscrepancy)?
             .borrow_column())
     }
 
-    fn downcast_and_borrow_mut(column: &AnyPtr) -> Result<ColumnRefMut<C>, DbError> {
+    fn downcast_and_borrow_mut(column: &AnyPtr) -> Result<RawColumnRefMut<C>, DbError> {
         Ok(column
             .downcast_ref::<ColumnInner<C>>()
             .ok_or(DbError::ColumnTypeDiscrepancy)?
@@ -457,7 +469,7 @@ impl<'b, C: Component> ColumnInner<C> {
     //}
     
     pub fn dynamic_swap_and_destroy(column: &AnyPtr, index: usize) -> ColumnSwapRemoveResult {
-        let mut column_ref: ColumnRefMut<C> = ColumnInner::downcast_column(column).borrow_column_mut();
+        let mut column_ref: RawColumnRefMut<C> = ColumnInner::downcast_column(column).borrow_column_mut();
         unsafe { column_ref.swap_and_destroy(index) }
     }
 
