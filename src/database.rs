@@ -1,9 +1,9 @@
-#[allow(dead_code)] // during re-write only
 #[macro_use]
 pub mod reckoning {
     use core::fmt;
     // misc
     use std::any::Any;
+    use std::collections::HashMap;
     use std::error::Error;
     use std::fmt::Debug;
     use std::fmt::Display;
@@ -28,6 +28,8 @@ pub mod reckoning {
     use crate::components::ComponentType;
     use crate::components::ComponentTypeSet;
     use crate::id::*;
+    use crate::indexing::DbIndex;
+    use crate::indexing::Index;
     use crate::mapping::DbMaps;
     use crate::mapping::GetDbMap;
     use crate::table::*;
@@ -59,7 +61,6 @@ pub mod reckoning {
 
     impl Error for EntityAllocError {}
 
-    type EntityFreeList = Vec<EntityId>;
     type EntityAllocResult = Result<EntityId, EntityAllocError>;
 
     impl<T> std::convert::From<PoisonError<T>> for EntityAllocError {
@@ -83,10 +84,8 @@ pub mod reckoning {
         }
 
         fn alloc(&self) -> EntityAllocResult {
-            // TODO: Better allocator: alloc blocks of ID's and cache them
-            // per-thread, re-alloc a block when a thread runs out, reclaiming
-            // the free list. ALternatively use a per thread free list
-
+            // TODO: Better allocator
+            
             let mut guard = self.free.lock()?;
 
             match guard.pop() {
@@ -239,6 +238,10 @@ pub mod reckoning {
         /// quickly querying the DB
         maps: DbMaps,
 
+        /// Data indexing. Indexes are user defined acceleration
+        /// structures that enable fast queries on component data
+        index: Arc<DashMap<ComponentType, Index>>,
+
         /// Cache of the column headers we've seen/created
         /// These can be used to quickly instantiate tables with
         /// types of columns we've already built
@@ -262,7 +265,7 @@ pub mod reckoning {
                 headers: Arc::new(DashMap::new()),
                 maps: DbMaps::new(),
             };
-            
+
             // prettier debug output when dealing with unit/null components
             StableTypeId::register_debug_info::<()>();
 
@@ -272,6 +275,11 @@ pub mod reckoning {
                 .new_family(unit_family_set)
                 .expect("please report this bug - unable to create unit component family");
             db
+        }
+
+        pub fn enable_index<I: DbIndex<C>, C: Component>(&mut self) {
+            let index = I::default();
+
         }
 
         pub(crate) fn get_column(&self, key: &ColumnKey) -> Option<ColumnMapRef> {
@@ -1036,13 +1044,15 @@ pub mod reckoning {
     // Type system gymnastics
     impl<'db, S: crate::transform::SelectOne<'db>> GetAsRefType<'db, S, &'db S::Type> for *mut Vec<<S as crate::transform::SelectOne<'db>>::Type>
     {
+        #[inline(always)]
         unsafe fn get_as_ref_type(&self, index: usize) -> Option<&'db S::Type> {
             (**self).get(index)
         }
     }
-
+    
     impl<'db, S: crate::transform::SelectOne<'db>> GetAsRefType<'db, S, &'db mut S::Type> for *mut Vec<<S as crate::transform::SelectOne<'db>>::Type>
     {
+        #[inline(always)]
         unsafe fn get_as_ref_type(&self, index: usize) -> Option<&'db mut S::Type> {
             (**self).get_mut(index)
         }
@@ -1149,6 +1159,8 @@ pub mod reckoning {
                                     let col_idx = (i * self.width) + $i;
                                     let column = db.get_column(self.keys.get_unchecked(col_idx)).expect("expected initialized column for iteration");
                                     <$t as crate::transform::SelectOne<'db>>::BorrowType::from(column.borrow_column_as())
+
+                                    // TODO: Mark columns that are Write<C> as dirty
                                 }
                             ,)+);
                             $(

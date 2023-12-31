@@ -152,7 +152,7 @@ where
             .map(|family| {
                 db.get_table(family).expect("expected table")
             }).for_each(|table| {
-
+                
                 // iterating row_components here instead of component_set BECAUSE component sets are
                 // ordered sets, whereas row_components is simply a vector with the same ordering
                 // as the combination of our sparse read and write lists

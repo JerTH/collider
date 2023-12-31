@@ -2,8 +2,11 @@ use std::ops::Rem;
 use std::collections::HashMap;
 use std::fmt::Debug;
 
+use collider::indexes::spatial::Spatial;
 use collider::transform::{Read, Phase};
 use collider::{*, transform::{Transformation, Write}};
+
+use crate::indexes::spatial::SpatialIndex;
 
 #[test]
 pub fn rocket_launch() {
@@ -11,12 +14,15 @@ pub fn rocket_launch() {
 
     let mut db = EntityDatabase::new();
     
+    // Enables the [SpatialIndex], and associates it with the [Physics] component
+    db.enable_index::<SpatialIndex, Physics>();
+    
     let mission_control = db.create().unwrap();
     db.add_component(mission_control, MissionController::new()).unwrap();
     db.add_component(mission_control, Radio::default()).unwrap();
 
     let mut rockets = Vec::new();
-    for i in 0..10000u64 {
+    for i in 0..1000u64 {
         let rand: f64 = (0..8).fold(3029487435683079979u64, |a, j: u64| 
               (a.overflowing_mul(a).0)
             ^ (j.overflowing_mul(j).0.overflowing_mul(j).0)
@@ -39,6 +45,7 @@ pub fn rocket_launch() {
     simulation.add_transformation(MissionControlSystem {});
     simulation.add_transformation(RocketAvionicsSystem {});
     
+    println!();
     let mut loops = 0;
     loop {
         loops += 1;
@@ -59,6 +66,19 @@ pub struct Physics {
     net_force: f64,
 }
 impl Component for Physics {}
+
+impl Spatial for Physics {
+    type V = (f64, f64, f64);
+    type S = f64;
+
+    fn position(&self) -> Self::V {
+        (0.0, 0.0, self.altitude)
+    }
+
+    fn size_radius(&self) -> Self::S {
+        0.0
+    }
+}
 
 #[derive(Default, Debug, Clone)]
 pub struct FuelTank {

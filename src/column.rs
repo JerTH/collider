@@ -217,7 +217,8 @@ impl ColumnHeader {
 #[derive(Debug)]
 pub struct Column {
     pub header: ColumnHeader, // Meta-data and function ptrs
-    pub data: AnyPtr,       // ColumnInner<T>
+    pub dirty: bool, // True if the data in the column has been modified
+    pub data: AnyPtr, // ColumnInner<T>
 }
 
 /// Used to break apart a run-time tracked borrow into its component parts (an atomic borrow and a pointer)

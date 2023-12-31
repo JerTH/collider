@@ -24,10 +24,16 @@ impl SpatialIndexEntry {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct SpatialIndex {
     grid_size: f64,
     hash_grid: HashMap<SpatialIndexGridVector2D, Vec<SpatialIndexEntry>>,
+}
+
+impl Default for SpatialIndex {
+    fn default() -> Self {
+        Self::new(1000.0)
+    }
 }
 
 impl SpatialIndex {
@@ -104,8 +110,8 @@ pub trait Spatial {
     fn size_radius(&self) -> Self::S;
 }
 
-impl<'index, C> DbIndex<'index, C> for SpatialIndex where C: Component + Spatial {
-    fn indexed(&'index self) -> impl Iterator<Item = EntityId> + 'index {
+impl<C> DbIndex<C> for SpatialIndex where C: Component + Spatial {
+    fn indexed<'i>(&'i self) -> impl Iterator<Item = EntityId> + 'i {
         self.hash_grid.iter().map(|bucket| bucket.1).flatten().filter_map(|entry| match entry {
             SpatialIndexEntry::InGrid(entity) => Some(*entity),
             SpatialIndexEntry::Nearby(_) => todo!(),

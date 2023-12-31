@@ -5,7 +5,7 @@
 //! Indexes (Indices) are used to speed up access into the [EntityDatabase] for more
 //! specialized queries
 
-use crate::{Component, EntityId};
+use crate::{Component, EntityId, components::ComponentType, database::reckoning::AnyPtr};
 
 /// An [IndexQuery] represents a question to be asked of a [DbIndex] attached to an [EntityDatabase]
 pub trait IndexQuery<'i, C: Component> {
@@ -13,7 +13,7 @@ pub trait IndexQuery<'i, C: Component> {
 
     fn on_index(query: Self, index: &'i Self::Index) -> impl Iterator<Item = EntityId> + 'i
     where
-        Self::Index: DbIndex<'i, C>;
+        Self::Index: DbIndex<C>;
 }
 
 /// A [DbIndex] describes an index of data stored adjacent to an [EntityDatabase] which
@@ -29,18 +29,24 @@ pub trait IndexQuery<'i, C: Component> {
 /// list of entities which match whatever predicate the query is meant to satisfy.
 /// This list of entities is then used to accelerate a [Transformation] being executed
 /// on the [EntityDatabase]
-pub trait DbIndex<'i, C: Component> {
+pub trait DbIndex<C: Component>: Default {
     /// Returns an iterator over every [EntityId] currently indexed
-    fn indexed(&'i self) -> impl Iterator<Item = EntityId> + 'i;
+    fn indexed<'i>(&'i self) -> impl Iterator<Item = EntityId> + 'i;
 
     /// Called whenever a component we're interested in changes
-    fn on_change(&self, entity: &EntityId, new_value: &C);
+    fn on_change<'i>(&self, entity: &EntityId, new_value: &C);
 
     /// Runs an [IndexQuery] on a [DbIndex], returning an iterator over its results
-    fn query<Q: IndexQuery<'i, C> + 'i>(index: &'i Q::Index, query: Q) -> impl Iterator<Item = EntityId> + 'i
+    fn query<'i, Q: IndexQuery<'i, C> + 'i>(index: &'i Q::Index, query: Q) -> impl Iterator<Item = EntityId> + 'i
     where
-        <Q as IndexQuery<'i, C>>::Index: DbIndex<'i, C>,
+        <Q as IndexQuery<'i, C>>::Index: DbIndex<C>,
     {
         Q::on_index(query, &index)
     }
+}
+
+#[derive(Debug)]
+pub struct Index {
+    associated: ComponentType,
+    ptr: AnyPtr,
 }
