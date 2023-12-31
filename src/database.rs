@@ -3,7 +3,6 @@ pub mod reckoning {
     use core::fmt;
     // misc
     use std::any::Any;
-    use std::collections::HashMap;
     use std::error::Error;
     use std::fmt::Debug;
     use std::fmt::Display;
@@ -68,7 +67,7 @@ pub mod reckoning {
             EntityAllocError::PoisonedFreeList
         }
     }
-
+    
     #[derive(Debug)]
     pub struct EntityAllocator {
         count: AtomicU32,
@@ -264,6 +263,7 @@ pub mod reckoning {
                 columns: Arc::new(DashMap::new()),
                 headers: Arc::new(DashMap::new()),
                 maps: DbMaps::new(),
+                index: Arc::new(DashMap::new()),
             };
 
             // prettier debug output when dealing with unit/null components
@@ -283,17 +283,16 @@ pub mod reckoning {
         }
 
         pub(crate) fn get_column(&self, key: &ColumnKey) -> Option<ColumnMapRef> {
-            tracing::trace!(%key, "IMMUTABLE COLUMN ACCESS");
             self.columns.get(key)
         }
 
         pub(crate) fn get_column_mut(&self, key: &ColumnKey) -> Option<ColumnMapRefMut> {
-            tracing::trace!(%key, "⚠MUTABLE COLUMN ACCESS⚠");
+            tracing::trace!(%key, "mutable column access");
             self.columns.get_mut(key)
         }
-
+        
         pub(crate) fn insert_column(&self, key: ColumnKey, column: Column) {
-            tracing::trace!(%key, "⚠MUTABLE COLUMN ACCESS⚠");
+            tracing::trace!(%key, "mutable column access: inserting new column");
             self.columns.insert(key, column);
         }
 
@@ -1049,7 +1048,7 @@ pub mod reckoning {
             (**self).get(index)
         }
     }
-    
+
     impl<'db, S: crate::transform::SelectOne<'db>> GetAsRefType<'db, S, &'db mut S::Type> for *mut Vec<<S as crate::transform::SelectOne<'db>>::Type>
     {
         #[inline(always)]
@@ -1120,6 +1119,7 @@ pub mod reckoning {
                         <$t as crate::transform::SelectOne<'db>>::Type: crate::components::Component,
                         <$t as crate::transform::SelectOne<'db>>::BorrowType: crate::column::BorrowAsRawParts,
                         crate::column::Column: crate::column::BorrowColumnAs<<$t as crate::transform::SelectOne<'db>>::Type, <$t as crate::transform::SelectOne<'db>>::BorrowType>,
+                        crate::column::Column: crate::column::MarkIfWrite<<$t as crate::transform::SelectOne<'db>>::BorrowType>,
                         *mut Vec<$t::Type>: crate::database::reckoning::GetAsRefType<'db, $t, <$t as crate::transform::SelectOne<'db>>::Ref>,
                         $t: 'static,
                     )+
@@ -1142,6 +1142,7 @@ pub mod reckoning {
                         <$t as crate::transform::SelectOne<'db>>::BorrowType: crate::column::BorrowAsRawParts,
                         *mut Vec<$t::Type>: crate::database::reckoning::GetAsRefType<'db, $t, <$t as crate::transform::SelectOne<'db>>::Ref>,
                         crate::column::Column: crate::column::BorrowColumnAs<<$t as crate::transform::SelectOne<'db>>::Type, <$t as crate::transform::SelectOne<'db>>::BorrowType>,
+                        crate::column::Column: crate::column::MarkIfWrite<<$t as crate::transform::SelectOne<'db>>::BorrowType>,
                         $t: 'static,
                     )+
                 {
@@ -1158,9 +1159,11 @@ pub mod reckoning {
                                     use crate::column::BorrowColumnAs;
                                     let col_idx = (i * self.width) + $i;
                                     let column = db.get_column(self.keys.get_unchecked(col_idx)).expect("expected initialized column for iteration");
+
+                                    <crate::column::Column as crate::column::MarkIfWrite<<$t as crate::transform::SelectOne<'db>>::BorrowType>>::mark_if_write(&column);
+
                                     <$t as crate::transform::SelectOne<'db>>::BorrowType::from(column.borrow_column_as())
 
-                                    // TODO: Mark columns that are Write<C> as dirty
                                 }
                             ,)+);
                             $(

@@ -1,7 +1,7 @@
 use std::{
     cell::UnsafeCell,
     fmt::Display,
-    ptr::NonNull, any::Any,
+    ptr::NonNull, any::Any, sync::atomic::AtomicBool,
 };
 
 use crate::{
@@ -213,12 +213,26 @@ impl ColumnHeader {
     }
 }
 
+pub(crate) trait MarkIfWrite<C> {
+    fn mark_if_write(&self);
+}
+
 /// A type erased container for storing a contiguous column of data
 #[derive(Debug)]
 pub struct Column {
     pub header: ColumnHeader, // Meta-data and function ptrs
-    pub dirty: bool, // True if the data in the column has been modified
+    pub dirty: AtomicBool, // True if the data in the column has been modified
     pub data: AnyPtr, // ColumnInner<T>
+}
+
+impl<C: Component> MarkIfWrite<RawColumnRef<C>> for Column {
+    fn mark_if_write(&self) {}
+}
+
+impl<C: Component> MarkIfWrite<RawColumnRefMut<C>> for Column {
+    fn mark_if_write(&self) {
+        self.dirty.fetch_or(true, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// Used to break apart a run-time tracked borrow into its component parts (an atomic borrow and a pointer)
@@ -264,7 +278,7 @@ impl<C: Component> BorrowColumnAs<C, RawColumnRefMut<C>> for Column {
 
 impl<'b> Column {
     pub fn new(header: ColumnHeader, data: AnyPtr) -> Column {
-        Column { header, data }
+        Column { header, data, dirty: AtomicBool::new(false) }
     }
 
     pub(crate) fn instance_with<C: Component>(&mut self, entity: &EntityId, component: C) -> Result<usize, DbError> {
