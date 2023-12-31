@@ -20,8 +20,11 @@ pub mod column;
 pub mod table;
 pub mod transform;
 pub mod conflict;
+pub mod transfer;
 pub mod database;
+pub mod mapping;
 pub mod indexing;
+pub mod indexes;
 
 // Use declarations
 pub use id::EntityId;

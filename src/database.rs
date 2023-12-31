@@ -15,11 +15,6 @@ pub mod reckoning {
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::PoisonError;
-    use std::sync::RwLock;
-    use std::sync::RwLockWriteGuard;
-
-    // collections
-    use std::collections::HashMap;
     
     // crate
     use crate::column::Column;
@@ -33,8 +28,12 @@ pub mod reckoning {
     use crate::components::ComponentType;
     use crate::components::ComponentTypeSet;
     use crate::id::*;
+    use crate::mapping::DbMaps;
+    use crate::mapping::GetDbMap;
     use crate::table::*;
     use crate::EntityId;
+    use crate::transfer::TransferEdge;
+    use crate::transfer::TransferGraph;
 
     // typedefs
     pub(crate) type AnyPtr = Box<dyn Any>;
@@ -43,201 +42,7 @@ pub mod reckoning {
     use dashmap::try_result::TryResult as DashMapTryResult;
     use dashmap::mapref::one::Ref as DashMapRef;
     use dashmap::mapref::one::RefMut as DashMapRefMut;
-    use transfer::TransferGraph;
-    
-    pub trait DbMapping<'db> {
-        type Guard;
-        type From;
-        type Map;
-        type To;
-    }
-
-    impl<'db, F, T> DbMapping<'db> for (F, T)
-    where
-        F: 'db,
-        T: 'db + Clone,
-    {
-        type Guard = RwLockWriteGuard<'db, Self::Map>;
-        type From = F;
-        type Map = HashMap<F, T>;
-        type To = T;
-    }
-
-    pub trait GetDbMap<'db, M: DbMapping<'db>> {
-        fn get(&self, from: &M::From) -> Option<M::To>;
-        fn mut_map(&'db self) -> Option<M::Guard>;
-    }
-
-    impl<'db> GetDbMap<'db, (ComponentTypeSet, FamilyId)> for DbMaps {
-        fn get(
-            &self,
-            from: &<(ComponentTypeSet, FamilyId) as DbMapping>::From,
-        ) -> Option<<(ComponentTypeSet, FamilyId) as DbMapping>::To> {
-            self.component_group_to_family
-                .read()
-                .ok()
-                .and_then(|g| g.get(from).cloned())
-        }
-
-        fn mut_map(&'db self) -> Option<<(ComponentTypeSet, FamilyId) as DbMapping>::Guard> {
-            self.component_group_to_family.write().ok()
-        }
-    }
-
-    impl<'db> GetDbMap<'db, (EntityId, FamilyId)> for DbMaps {
-        fn get(
-            &self,
-            from: &<(EntityId, FamilyId) as DbMapping>::From,
-        ) -> Option<<(EntityId, FamilyId) as DbMapping>::To> {
-            self.entity_to_owning_family
-                .read()
-                .ok()
-                .and_then(|g| g.get(from).cloned())
-        }
-
-        fn mut_map(&'db self) -> Option<<(EntityId, FamilyId) as DbMapping>::Guard> {
-            self.entity_to_owning_family.write().ok()
-        }
-    }
-
-    impl<'db> GetDbMap<'db, (ComponentType, FamilyIdSet)> for DbMaps {
-        fn get(
-            &self,
-            from: &<(ComponentType, FamilyIdSet) as DbMapping>::From,
-        ) -> Option<<(ComponentType, FamilyIdSet) as DbMapping>::To> {
-            self.families_containing_component
-                .read()
-                .ok()
-                .and_then(|g| g.get(from).cloned())
-        }
-
-        fn mut_map(&'db self) -> Option<<(ComponentType, FamilyIdSet) as DbMapping>::Guard> {
-            self.families_containing_component.write().ok()
-        }
-    }
-
-    impl<'db> GetDbMap<'db, (ComponentTypeSet, FamilyIdSet)> for DbMaps {
-        fn get(
-            &self,
-            from: &<(ComponentTypeSet, FamilyIdSet) as DbMapping>::From,
-        ) -> Option<<(ComponentTypeSet, FamilyIdSet) as DbMapping>::To> {
-            self.families_containing_set
-                .read()
-                .ok()
-                .and_then(|g| g.get(from).cloned())
-        }
-
-        fn mut_map(&'db self) -> Option<<(ComponentTypeSet, FamilyIdSet) as DbMapping>::Guard> {
-            self.families_containing_set.write().ok()
-        }
-    }
-
-    impl<'db> GetDbMap<'db, (FamilyId, ComponentTypeSet)> for DbMaps {
-        fn get(
-            &self,
-            from: &<(FamilyId, ComponentTypeSet) as DbMapping>::From,
-        ) -> Option<<(FamilyId, ComponentTypeSet) as DbMapping>::To> {
-            self.components_of_family
-                .read()
-                .ok()
-                .and_then(|g| g.get(from).cloned())
-        }
-
-        fn mut_map(&'db self) -> Option<<(FamilyId, ComponentTypeSet) as DbMapping>::Guard> {
-            self.components_of_family.write().ok()
-        }
-    }
-
-    impl<'db> GetDbMap<'db, (FamilyId, TransferGraph)> for DbMaps {
-        fn get(
-            &self,
-            from: &<(FamilyId, ComponentTypeSet) as DbMapping>::From,
-        ) -> Option<<(FamilyId, TransferGraph) as DbMapping>::To> {
-            self.transfer_graph_of_family
-                .read()
-                .ok()
-                .and_then(|g| g.get(from).cloned())
-        }
-
-        fn mut_map(&'db self) -> Option<<(FamilyId, TransferGraph) as DbMapping>::Guard> {
-            self.transfer_graph_of_family.write().ok()
-        }
-    }
-
-    /// Contains several maps used to cache relationships between
-    /// data in the [EntityDatabase]. The data in [DbMaps] is
-    /// intended to be cross-cutting, and of a higher order than
-    /// data stored in components
-    ///
-    /// The tradeoff we're after here is to do a lot of work up-front when
-    /// dealing with components and how they relate to one another. The
-    /// strategy is to cache and record all of the informaiton about
-    /// families at their creation, and then use that information to
-    /// accelerate interactions with the [EntityDatabase]
-    #[derive(Debug)]
-    pub struct DbMaps {
-        component_group_to_family: RwLock<HashMap<ComponentTypeSet, FamilyId>>,
-        entity_to_owning_family: RwLock<HashMap<EntityId, FamilyId>>,
-        families_containing_component: RwLock<HashMap<ComponentType, FamilyIdSet>>,
-        families_containing_set: RwLock<HashMap<ComponentTypeSet, FamilyIdSet>>,
-        components_of_family: RwLock<HashMap<FamilyId, ComponentTypeSet>>,
-        transfer_graph_of_family: RwLock<HashMap<FamilyId, TransferGraph>>,
-        // TODO: The traits that back DbMaps are designed to make
-        // extensibility possible, dynamic mappings/extensions are
-        // a future addition to be explored
-    }
-
-    impl<'db> DbMaps {
-        fn new() -> Self {
-            Self {
-                component_group_to_family: Default::default(),
-                entity_to_owning_family: Default::default(),
-                families_containing_component: Default::default(),
-                families_containing_set: Default::default(),
-                components_of_family: Default::default(),
-                transfer_graph_of_family: Default::default(),
-            }
-        }
-
-        /// Retrieves a value from a mapping, if it exists
-        ///
-        /// Returned values are deliberately copied/cloned, rather than
-        /// referenced. This is to avoid issues of long-lived references
-        /// and so synchronization primitives are held for the shortest
-        /// time possible. As such, it is encouraged to only map to small
-        /// values, or, large values stored behind a reference counted
-        /// pointer
-        pub fn get_map<M>(&self, from: &M::From) -> Option<M::To>
-        where
-            M: DbMapping<'db>,
-            Self: GetDbMap<'db, M>,
-            M::To: 'db,
-        {
-            <Self as GetDbMap<'db, M>>::get(&self, from)
-        }
-
-        pub fn mut_map<M: DbMapping<'db>>(&'db self) -> Option<M::Guard>
-        where
-            M: DbMapping<'db>,
-            M::Map: 'db,
-            Self: GetDbMap<'db, M>,
-        {
-            <Self as GetDbMap<'db, M>>::mut_map(&self)
-        }
-    }
-
-    
-
-    pub struct Family {
-        components_set: ComponentTypeSet,
-        transfer_graph: transfer::TransferGraph,
-    }
-
-    impl Family {
-        fn get_transfer(&self, _component: &ComponentType) -> Option<transfer::Edge> {
-            todo!()
-        }
-    }
+        
 
     #[derive(Debug)]
     enum EntityAllocError {
@@ -457,7 +262,7 @@ pub mod reckoning {
                 headers: Arc::new(DashMap::new()),
                 maps: DbMaps::new(),
             };
-
+            
             // prettier debug output when dealing with unit/null components
             StableTypeId::register_debug_info::<()>();
 
@@ -508,12 +313,6 @@ pub mod reckoning {
         where
             DbMaps: GetDbMap<'db, (K, V)>,
         {
-            //tracing::trace!(
-            //    k = ?key,
-            //    v = ?value,
-            //    "updating mapping"
-            //);
-            
             let mut guard = self
                 .maps
                 .mut_map::<(K, V)>()
@@ -783,7 +582,7 @@ pub mod reckoning {
             let _trace_span = tracing::span!(tracing::Level::TRACE, "family_after_add").entered();
 
             // First try and find an already cached edge on the transfer graph for this family
-            if let Some(transfer::Edge::Add(family_id)) =
+            if let Some(TransferEdge::Add(family_id)) =
                 self.query_transfer_graph(curr_family, new_component)
             {
                 return Ok(family_id);
@@ -813,13 +612,13 @@ pub mod reckoning {
                     self.update_transfer_graph(
                         curr_family,
                         new_component,
-                        transfer::Edge::Add(family),
+                        TransferEdge::Add(family),
                     )?;
 
                     self.update_transfer_graph(
                         &family,
                         new_component,
-                        transfer::Edge::Remove(*curr_family),
+                        TransferEdge::Remove(*curr_family),
                     )?;
 
 
@@ -919,7 +718,7 @@ pub mod reckoning {
             &self,
             family: &FamilyId,
             component: &ComponentType,
-        ) -> Option<transfer::Edge> {
+        ) -> Option<TransferEdge> {
             self.maps
                 .get_map::<(FamilyId, TransferGraph)>(family)
                 .and_then(|graph| graph.get(component))
@@ -929,7 +728,7 @@ pub mod reckoning {
             &self,
             family: &FamilyId,
             component: &ComponentType,
-            edge: transfer::Edge,
+            edge: TransferEdge,
         ) -> Result<(), DbError> {
             let mut guard = self
                 .maps
@@ -1227,48 +1026,7 @@ pub mod reckoning {
     /// Functionality related to quickly transferring entities from one
     /// family to another within an [super::EntityDatabase]
     mod transfer {
-        use super::FamilyId;
-        use crate::database::reckoning::ComponentType;
-        use std::collections::HashMap;
-        use std::sync::Arc;
-        use std::sync::RwLock;
-
-        #[derive(Debug, Clone)]
-        pub struct TransferGraph {
-            links: Arc<RwLock<HashMap<ComponentType, Edge>>>,
-        }
-
-        impl TransferGraph {
-            pub fn new() -> Self {
-                Self {
-                    links: Arc::new(RwLock::new(HashMap::new())),
-                }
-            }
-
-            pub fn get(&self, component: &ComponentType) -> Option<Edge> {
-                match self.links.read() {
-                    Ok(graph) => graph.get(component).cloned(),
-                    Err(e) => {
-                        panic!("unable to read transfer graph - rwlock - {:?}", e)
-                    }
-                }
-            }
-
-            pub fn set(&self, component: &ComponentType, edge: Edge) -> Option<Edge> {
-                match self.links.write() {
-                    Ok(mut graph) => graph.insert(*component, edge),
-                    Err(e) => {
-                        panic!("unable to set transfer graph - rwlock - {:?}", e)
-                    }
-                }
-            }
-        }
-
-        #[derive(Debug, Clone)]
-        pub enum Edge {
-            Add(FamilyId),
-            Remove(FamilyId),
-        }
+        
     } // transfer ======================================================================
 
     pub trait GetAsRefType<'db, S: crate::transform::SelectOne<'db>, R> {
