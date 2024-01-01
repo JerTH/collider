@@ -37,6 +37,8 @@ impl<'db> Phase<'db> {
     where
         T: Transformation,
     {
+        tracing::debug!(transformation = std::any::type_name::<T>(), "adding phase transformation");
+
         // TODO:
         // Rebuilding the graph with every insert is super inefficient,
         // some sort of from_iter implementation or a defered building
@@ -85,14 +87,20 @@ impl<'db> Phase<'db> {
     }
     
     pub fn run_on(&mut self, db: &'db EntityDatabase) -> PhaseResult {
-        for subphase in self.subphases.iter_mut() {
+        let _phase_span = tracing::span!(tracing::Level::DEBUG, "phase").entered();
+        
+        let subphase_count = self.subphases.len();
+        for (i, subphase) in self.subphases.iter_mut().enumerate() {
+            let _subphase_span = tracing::span!(tracing::Level::TRACE, "subphase").entered();
+            tracing::trace!("executing subphase {} of {} ({} transformations)", i, subphase_count, subphase.len());
             
+            // TODO: engage multithreading here
+
             let mut subphase_results = Vec::new();
             for (id, dyn_transformation) in subphase {
                 let transform_result = dyn_transformation.ptr.run_on(db);
                 subphase_results.push((id, transform_result));
             }
-            // TODO: engage multithreading here
         }
         Ok(())
     }
@@ -103,12 +111,11 @@ pub struct TransformationId(std::any::TypeId);
 
 pub trait Transformation: 'static {
     type Data: Selection;
-    
+
+    /// Run the [Transformation] with a set of 
     fn run(data: Rows<Self::Data>) -> TransformationResult;
 
-    fn messages(_: Messages) {
-        todo!()
-    }
+    fn messages(messages: Messages) {}
 
     /// Returns a unique identifier for a given transformation impl
     fn id() -> TransformationId
@@ -116,6 +123,10 @@ pub trait Transformation: 'static {
         Self: 'static,
     {
         TransformationId(std::any::TypeId::of::<Self>())
+    }
+
+    fn name() -> &'static str {
+        std::any::type_name::<Self>()
     }
 }
 
@@ -212,7 +223,7 @@ impl<'db, C> const MetaData for Read<C> where C: Component {}
 impl<'db, C> const MetaData for Write<C> where C: Component {}
 
 pub struct RowIter<'db, RTuple> {
-    // allow statement fixes never read lint - this is in fact read but only from a macro
+    // allow statement fixes never read lint - this is in fact read but only within a macro
     #[allow(dead_code)] pub(crate) db: &'db EntityDatabase,
 
     marker: PhantomData<RTuple>,

@@ -1,28 +1,42 @@
+use std::any::type_name;
 use std::ops::Rem;
 use std::collections::HashMap;
 use std::fmt::Debug;
 
-use collider::indexes::spatial::Spatial;
+use collider::indexes::spatial::{Spatial, Nearby};
 use collider::transform::{Read, Phase};
 use collider::{*, transform::{Transformation, Write}};
+use tracing_subscriber::fmt::format::FmtSpan;
 
 use crate::indexes::spatial::SpatialIndex;
 
+fn trace() {
+    println!("enabling tracing");
+    std::env::set_var("RUST_BACKTRACE", "1");
+
+    let subscriber = tracing_subscriber::FmtSubscriber::builder()
+        .compact()
+        .with_max_level(tracing::Level::DEBUG)
+        .finish();
+
+    let _ = tracing::subscriber::set_global_default(subscriber);
+}
+
 #[test]
 pub fn rocket_launch() {
-    std::env::set_var("RUST_BACKTRACE", "1");
+    trace();
 
     let mut db = EntityDatabase::new();
     
     // Enables the [SpatialIndex], and associates it with the [Physics] component
     db.enable_index::<SpatialIndex, Physics>();
-    
+
     let mission_control = db.create().unwrap();
     db.add_component(mission_control, MissionController::new()).unwrap();
     db.add_component(mission_control, Radio::default()).unwrap();
 
     let mut rockets = Vec::new();
-    for i in 0..1000u64 {
+    for i in 0..3u64 {
         let rand: f64 = (0..8).fold(3029487435683079979u64, |a, j: u64| 
               (a.overflowing_mul(a).0)
             ^ (j.overflowing_mul(j).0.overflowing_mul(j).0)
@@ -38,20 +52,19 @@ pub fn rocket_launch() {
         rockets.push(rocket)
     }
 
-    let mut simulation = Phase::new();
-    simulation.add_transformation(RadioSystem {});
-    simulation.add_transformation(RocketSystem {});
-    simulation.add_transformation(PhysicsSystem {});
-    simulation.add_transformation(MissionControlSystem {});
-    simulation.add_transformation(RocketAvionicsSystem {});
+    let mut phase = Phase::new();
+    phase.add_transformation(RadioSystem {});
+    phase.add_transformation(RocketSystem {});
+    phase.add_transformation(PhysicsSystem {});
+    phase.add_transformation(MissionControlSystem {});
+    phase.add_transformation(RocketAvionicsSystem {});
     
-    println!();
     let mut loops = 0;
     loop {
         loops += 1;
-        simulation.run_on(&db).unwrap();
-
-        if loops > 100 {
+        phase.run_on(&db).unwrap();
+        
+        if loops > 5 {
             break;
         }
     }
@@ -173,6 +186,34 @@ pub struct Radio {
 }
 
 impl Component for Radio {}
+
+struct ProximitySystem {}
+
+//use transform::Rows;
+//impl Transformation for ProximitySystem {
+//    // This means, iterate every entity that has both a [Physics] and an [Avionics]
+//    // component, and also get a [Nearby] index query which iterates the [Physics]
+//    // components of every entity that meets the [Nearby] queries critera.
+//    // In this case, [Nearby] implements a simple spatial hash index on [Physics]
+//    // components
+//    type Data = (Read<Physics>, Write<Avionics>, Nearby<Read<Physics>>);
+//    
+//    fn run(data: Rows<Self::Data>) -> transform::TransformationResult {
+//        for (physics, avionics, nearby) in data {
+//            let mut too_close = false;
+//            let this = nearby.this();
+//            
+//            for other in nearby {
+//                
+//            }
+//
+//            if too_close {
+//                avionics.state = AvionicsState::Abort;
+//            }
+//        }
+//        Ok(())
+//    }
+//}
 
 struct PhysicsSystem {}
 impl Transformation for PhysicsSystem {

@@ -11,8 +11,9 @@
 #![feature(return_position_impl_trait_in_trait)]
 
 // Module declarations
-#[macro_use]
-pub(crate) mod macros;
+#[macro_use] pub mod indexing_macros;
+#[macro_use] pub mod transformation_macros;
+
 pub mod id;
 pub mod borrowed;
 pub mod components;
@@ -24,6 +25,7 @@ pub mod transfer;
 pub mod database;
 pub mod mapping;
 pub mod indexing;
+
 pub mod indexes;
 
 // Use declarations

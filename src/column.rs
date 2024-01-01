@@ -31,15 +31,6 @@ impl<'b, C: Component> RawColumnRef<C> {
     }
 }
 
-//impl<C: Component> Deref for ColumnRef<C> {
-//    type Target = Vec<C>;
-//    fn deref(&self) -> &Self::Target {
-//        // SAFETY
-//        // Safe to access because we hold a runtime checked borrow
-//        unsafe { self.ptr_components.as_ref() }
-//    }
-//}
-
 pub struct RawColumnRefMut<C> {
     borrow: BorrowRefMut,
     ptr_entity_map: NonNull<Vec<EntityId>>,
@@ -152,23 +143,6 @@ impl<C: Component> RawColumnRefMut<C> {
     }
 }
 
-//impl<C> Deref for ColumnRefMut<C> {
-//    type Target = Vec<C>;
-//    fn deref(&self) -> &Self::Target {
-//        // SAFETY
-//        // Safe to access because we hold a runtime checked borrow
-//        unsafe { self.ptr_components.as_ref() }
-//    }
-//}
-//
-//impl<C> DerefMut for ColumnRefMut<C> {
-//    fn deref_mut(&mut self) -> &mut Self::Target {
-//        // SAFETY
-//        // Safe to access because we hold a runtime checked borrow
-//        unsafe { self.ptr_components.as_mut() }
-//    }
-//}
-
 pub const COLUMN_LENGTH_MAXIMUM: usize = 2048; // 16384
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -213,16 +187,9 @@ impl ColumnHeader {
     }
 }
 
+/// Marks a [Column] as dirty if it was part of a write transformation
 pub(crate) trait MarkIfWrite<C> {
     fn mark_if_write(&self);
-}
-
-/// A type erased container for storing a contiguous column of data
-#[derive(Debug)]
-pub struct Column {
-    pub header: ColumnHeader, // Meta-data and function ptrs
-    pub dirty: AtomicBool, // True if the data in the column has been modified
-    pub data: AnyPtr, // ColumnInner<T>
 }
 
 impl<C: Component> MarkIfWrite<RawColumnRef<C>> for Column {
@@ -233,6 +200,17 @@ impl<C: Component> MarkIfWrite<RawColumnRefMut<C>> for Column {
     fn mark_if_write(&self) {
         self.dirty.fetch_or(true, std::sync::atomic::Ordering::SeqCst);
     }
+}
+
+/// A type erased container for storing a contiguous column of data
+/// 
+/// Stores information in its header to allow constructing and modifying
+/// its inner data without type information
+#[derive(Debug)]
+pub struct Column {
+    pub header: ColumnHeader, // Meta-data and function ptrs
+    pub dirty: AtomicBool, // True if the data in the column has been modified
+    pub data: AnyPtr, // ColumnInner<T>
 }
 
 /// Used to break apart a run-time tracked borrow into its component parts (an atomic borrow and a pointer)
@@ -433,28 +411,6 @@ impl<'b, C: Component> ColumnInner<C> {
             .ok_or(DbError::ColumnTypeDiscrepancy)?
             .borrow_column_mut())
     }
-
-    /// Moves a single component from one [Column] to another, if they are the same type,
-    /// leaving an empty space in the source column
-    //pub fn dynamic_move(
-    //    from_ptr: &AnyPtr,
-    //    dest_ptr: &AnyPtr,
-    //    from_index: usize,
-    //    dest_index: usize,
-    //) -> Result<(), DbError> {
-    //    if ColumnInner::<C>::is_same_column(from_ptr, dest_ptr) { return Ok(()) }
-    //    
-    //    let mut from = ColumnInner::<C>::downcast_and_borrow_mut(from_ptr)?;
-    //    let mut dest = ColumnInner::<C>::downcast_and_borrow_mut(dest_ptr)?;
-//
-    //    debug_assert!(from.len() > from_index);
-    //    debug_assert!(dest.len() > dest_index);
-//
-    //    dest[dest_index] = from[from_index].clone();
-    //    from[from_index] = Default::default();
-//
-    //    Ok(())
-    //}
     
     /// Moves a single component from the given index in `from` [Column] to the end of
     /// `dest` column. Maintains compaction of both columns by swapping the last
@@ -474,12 +430,6 @@ impl<'b, C: Component> ColumnInner<C> {
         unsafe { from.move_component_to(&mut dest, from_index) }
     }
     
-    /// Resizes the column to hold at least [min_size] components
-    //pub fn dynamic_resize(column: &AnyPtr, min_size: usize) -> Result<usize, DbError> {
-    //    let inner: &ColumnInner<C> = ColumnInner::downcast_column(column);
-    //    inner.resize_minimum(min_size)
-    //}
-    
     pub fn dynamic_swap_and_destroy(column: &AnyPtr, index: usize) -> ColumnSwapRemoveResult {
         let mut column_ref: RawColumnRefMut<C> = ColumnInner::downcast_column(column).borrow_column_mut();
         unsafe { column_ref.swap_and_destroy(index) }
@@ -495,22 +445,6 @@ impl<'b, C: Component> ColumnInner<C> {
         let mut col_ref_mut = ColumnInner::<C>::downcast_column(column).borrow_column_mut();
         unsafe { col_ref_mut.push_instance(*entity) }
     }
-
-    //pub fn resize_minimum(&self, min_size: usize) -> Result<usize, DbError> {
-    //    let power_of_two_index = std::cmp::max(min_size, 1).next_power_of_two();
-    //    debug_assert!(power_of_two_index < COLUMN_LENGTH_MAXIMUM);
-//
-    //    let mut column = self.borrow_column_mut();
-    //    let len = column.len();
-    //    
-    //    if min_size >= len {
-    //        column.resize_with(power_of_two_index, Default::default);
-    //    }
-    //    
-    //    debug_assert!(column.len() >= min_size);
-//
-    //    Ok(column.len())
-    //}
 }
 
 

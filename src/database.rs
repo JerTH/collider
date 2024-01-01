@@ -27,8 +27,8 @@ pub mod reckoning {
     use crate::components::ComponentType;
     use crate::components::ComponentTypeSet;
     use crate::id::*;
-    use crate::indexing::DbIndex;
-    use crate::indexing::Index;
+    use crate::indexing::DatabaseIndex;
+    use crate::indexing::DatabaseIndexType;
     use crate::mapping::DbMaps;
     use crate::mapping::GetDbMap;
     use crate::table::*;
@@ -42,7 +42,6 @@ pub mod reckoning {
     use dashmap::DashMap;
     use dashmap::try_result::TryResult as DashMapTryResult;
     use dashmap::mapref::one::Ref as DashMapRef;
-    use dashmap::mapref::one::RefMut as DashMapRefMut;
         
 
     #[derive(Debug)]
@@ -67,7 +66,7 @@ pub mod reckoning {
             EntityAllocError::PoisonedFreeList
         }
     }
-    
+
     #[derive(Debug)]
     pub struct EntityAllocator {
         count: AtomicU32,
@@ -106,12 +105,6 @@ pub mod reckoning {
                     }))
                 }
             }
-        }
-
-        fn free(&self, id: EntityId) -> Result<(), EntityAllocError> {
-            let mut guard = self.free.lock()?;
-            guard.push(id.next_generation());
-            Ok(())
         }
     }
 
@@ -239,7 +232,7 @@ pub mod reckoning {
 
         /// Data indexing. Indexes are user defined acceleration
         /// structures that enable fast queries on component data
-        index: Arc<DashMap<ComponentType, Index>>,
+        index: Arc<DashMap<ComponentType, DatabaseIndexType>>,
 
         /// Cache of the column headers we've seen/created
         /// These can be used to quickly instantiate tables with
@@ -266,7 +259,7 @@ pub mod reckoning {
                 index: Arc::new(DashMap::new()),
             };
 
-            // prettier debug output when dealing with unit/null components
+            // Prettier debug output when dealing with unit/null components
             StableTypeId::register_debug_info::<()>();
 
             // setup the unit/null component family
@@ -276,16 +269,22 @@ pub mod reckoning {
                 .expect("please report this bug - unable to create unit component family");
             db
         }
-
-        pub fn enable_index<I: DbIndex<C>, C: Component>(&mut self) {
-            let index = I::default();
-
+        
+        /// Enables a [DbIndex] and returns a [Transformation] used to update it
+        /// 
+        /// The transformation must be added to a [Phase] and executed on this [EntityDatabase]
+        /// in order for the [DbIndex] to be properly updated. When that update happens can be controlled
+        /// by the user, by directly applying it, or adding it to an earlier or later [Phase]
+        pub fn enable_index<I: DatabaseIndex<C> + 'static, C: Component>(&mut self) {
+            tracing::info!("enabling index {:?} for {:?}", std::any::type_name::<I>(), std::any::type_name::<C>());
+            return;
+            //self.index.insert(ComponentType::of::<C>(), DatabaseIndexType::default_from_type::<I, C>());
         }
-
+        
         pub(crate) fn get_column(&self, key: &ColumnKey) -> Option<ColumnMapRef> {
             self.columns.get(key)
         }
-
+        
         pub(crate) fn get_column_mut(&self, key: &ColumnKey) -> Option<ColumnMapRefMut> {
             tracing::trace!(%key, "mutable column access");
             self.columns.get_mut(key)
@@ -302,10 +301,6 @@ pub mod reckoning {
 
         fn try_get_column(&self, key: &ColumnKey) -> DashMapTryResult<DashMapRef<ColumnKey, Column>> {
             return self.columns.try_get(key)
-        }
-
-        fn try_get_column_mut(&self, key: &ColumnKey) -> DashMapTryResult<DashMapRefMut<ColumnKey, Column>> {
-            return self.columns.try_get_mut(key)
         }
 
         pub(crate) fn get_table(&self, family: &FamilyId) -> Option<TableMapRef> {
@@ -1057,153 +1052,8 @@ pub mod reckoning {
         }
     }
     
-    /// Macros
-    ///
-    /// WARNING: TYPE SYSTEM/MACRO SHENANIGANS BEYOND THIS POINT
-    /// 
-    /// These macros make it possible to perform ergonomic
-    /// selections of data in an [super::EntityDatabase]
-    #[macro_use]
-    pub mod macros {
-        #[macro_export]
-        macro_rules! impl_transformations {
-            ($([$t:ident, $i:tt]),*) => {
-                #[allow(unused_parens)]
-                impl<'db, $($t),+> Iterator for crate::transform::RowIter<'db, ($($t),+)>
-                where
-                    $(
-                        $t: crate::transform::MetaData,
-                        $t: crate::transform::SelectOne<'db>,
-                        <$t as crate::transform::SelectOne<'db>>::Type: crate::components::Component,
-                        *mut Vec<$t::Type>: crate::database::reckoning::GetAsRefType<'db, $t, <$t as crate::transform::SelectOne<'db>>::Ref>,
-                    )+
-                {
-                    type Item = ($($t::Ref,)+);
-
-                    fn next(&mut self) -> Option<Self::Item> {
-                        if self.table_index >= (self.keys.len() / self.width) {
-                            return None;
-                        }
-                        
-                        use crate::database::reckoning::GetAsRefType;
-                        let row: Self::Item = (
-                            $(
-                                unsafe {
-                                    // Here we take a reference to our borrow and an opaque pointer to the column we're interested in
-                                    // and through various type system gymnastics we transform the pointer into an accessor with the
-                                    // correct mutablity, try to get a component from the column, and check for out of bounds
-                                    let (_, pointer): &(crate::borrowed::RawBorrow, std::ptr::NonNull<std::os::raw::c_void>) = self.borrows.get_unchecked(self.table_index + $i);
-                                    let casted: std::ptr::NonNull<Vec<$t::Type>> = pointer.cast::<Vec<$t::Type>>();
-                                    let raw: *mut Vec<$t::Type> = casted.as_ptr();
-                                    if let Some(result) = <*mut Vec<$t::Type> as GetAsRefType<'db, $t, <$t as crate::transform::SelectOne<'db>>::Ref>>::get_as_ref_type(&raw, self.column_index) {
-                                        result
-                                    } else {
-                                        self.table_index += 1;
-                                        self.column_index = 0;
-                                        return self.next()
-                                    }
-                                }
-                            ,)+
-                        );
-                        self.column_index += 1;
-                        Some(row)
-                    }
-                }
-                
-                #[allow(unused_parens)]
-                impl<'db, $($t),+> IntoIterator for crate::transform::Rows<'db, ($($t),+)>
-                where
-                    $(
-                        $t: crate::transform::MetaData,
-                        $t: crate::transform::SelectOne<'db>,
-                        <$t as crate::transform::SelectOne<'db>>::Type: crate::components::Component,
-                        <$t as crate::transform::SelectOne<'db>>::BorrowType: crate::column::BorrowAsRawParts,
-                        crate::column::Column: crate::column::BorrowColumnAs<<$t as crate::transform::SelectOne<'db>>::Type, <$t as crate::transform::SelectOne<'db>>::BorrowType>,
-                        crate::column::Column: crate::column::MarkIfWrite<<$t as crate::transform::SelectOne<'db>>::BorrowType>,
-                        *mut Vec<$t::Type>: crate::database::reckoning::GetAsRefType<'db, $t, <$t as crate::transform::SelectOne<'db>>::Ref>,
-                        $t: 'static,
-                    )+
-                {
-                    type Item = ($($t::Ref,)+);
-                    type IntoIter = crate::transform::RowIter<'db, ($($t),+)>;
-
-                    fn into_iter(self) -> Self::IntoIter {
-                        (&self).into_iter()
-                    }
-                }
-
-                #[allow(unused_parens)]
-                impl<'db, $($t),+> IntoIterator for &crate::transform::Rows<'db, ($($t),+)>
-                where
-                    $(
-                        $t: crate::transform::MetaData,
-                        $t: crate::transform::SelectOne<'db>,
-                        <$t as crate::transform::SelectOne<'db>>::Type: crate::components::Component,
-                        <$t as crate::transform::SelectOne<'db>>::BorrowType: crate::column::BorrowAsRawParts,
-                        *mut Vec<$t::Type>: crate::database::reckoning::GetAsRefType<'db, $t, <$t as crate::transform::SelectOne<'db>>::Ref>,
-                        crate::column::Column: crate::column::BorrowColumnAs<<$t as crate::transform::SelectOne<'db>>::Type, <$t as crate::transform::SelectOne<'db>>::BorrowType>,
-                        crate::column::Column: crate::column::MarkIfWrite<<$t as crate::transform::SelectOne<'db>>::BorrowType>,
-                        $t: 'static,
-                    )+
-                {
-                    type Item = ($($t::Ref,)+);
-                    type IntoIter = crate::transform::RowIter<'db, ($($t),+)>;
-
-                    fn into_iter(self) -> Self::IntoIter {
-                        let db = self.database();
-                        let mut iter = crate::transform::RowIter::<'db, ($($t),+)>::new(db);
-                        
-                        for i in 0..(self.keys.len() / self.width) {
-                            let borrows: ($($t::BorrowType,)+) = ($(
-                                unsafe {
-                                    use crate::column::BorrowColumnAs;
-                                    let col_idx = (i * self.width) + $i;
-                                    let column = db.get_column(self.keys.get_unchecked(col_idx)).expect("expected initialized column for iteration");
-
-                                    <crate::column::Column as crate::column::MarkIfWrite<<$t as crate::transform::SelectOne<'db>>::BorrowType>>::mark_if_write(&column);
-
-                                    <$t as crate::transform::SelectOne<'db>>::BorrowType::from(column.borrow_column_as())
-
-                                }
-                            ,)+);
-                            $(
-                                unsafe {
-                                    use crate::column::BorrowAsRawParts;
-                                    iter.borrows.push((borrows.$i).borrow_as_raw_parts());
-                                }
-                            )+
-                        }
-                        iter.keys = self.keys.clone();
-                        iter.width = self.width;
-                        iter
-                    }
-                }
-                
-                #[allow(unused_parens)]
-                impl<'a, $($t),+> const crate::transform::Selection for ($($t),+)
-                where
-                    $(
-                        $t: crate::transform::MetaData,
-                        $t: ~const crate::transform::SelectOne<'a>,
-                    )+
-                {
-                    const READS: &'static [Option<crate::components::ComponentType>] = &[$($t::reads(),)+];
-                    const WRITES: &'static [Option<crate::components::ComponentType>] = &[$($t::writes(),)+];
-                }
-            };
-        }
-    } // macros ========================================================================
+    
 } // reckoning =========================================================================
 
 // Exports
 pub use crate::database::reckoning::EntityDatabase;
-
-// Macro Impl's
-impl_transformations!([A, 0]);
-impl_transformations!([A, 0], [B, 1]);
-impl_transformations!([A, 0], [B, 1], [C, 2]);
-impl_transformations!([A, 0], [B, 1], [C, 2], [D, 3]);
-impl_transformations!([A, 0], [B, 1], [C, 2], [D, 3], [E, 4]);
-impl_transformations!([A, 0], [B, 1], [C, 2], [D, 3], [E, 4], [F, 5]);
-impl_transformations!([A, 0], [B, 1], [C, 2], [D, 3], [E, 4], [F, 5], [G, 6]);
-impl_transformations!([A, 0], [B, 1], [C, 2], [D, 3], [E, 4], [F, 5], [G, 6], [H, 7]);
