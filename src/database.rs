@@ -29,6 +29,7 @@ pub mod reckoning {
     use crate::id::*;
     use crate::indexing::DatabaseIndex;
     use crate::indexing::DatabaseIndexType;
+    use crate::indexing::IndexingTransformation;
     use crate::mapping::DbMaps;
     use crate::mapping::GetDbMap;
     use crate::table::*;
@@ -232,7 +233,7 @@ pub mod reckoning {
 
         /// Data indexing. Indexes are user defined acceleration
         /// structures that enable fast queries on component data
-        index: Arc<DashMap<ComponentType, DatabaseIndexType>>,
+        indice: Arc<DashMap<ComponentType, DatabaseIndexType>>,
 
         /// Cache of the column headers we've seen/created
         /// These can be used to quickly instantiate tables with
@@ -256,7 +257,7 @@ pub mod reckoning {
                 columns: Arc::new(DashMap::new()),
                 headers: Arc::new(DashMap::new()),
                 maps: DbMaps::new(),
-                index: Arc::new(DashMap::new()),
+                indice: Arc::new(DashMap::new()),
             };
 
             // Prettier debug output when dealing with unit/null components
@@ -275,16 +276,23 @@ pub mod reckoning {
         /// The transformation must be added to a [Phase] and executed on this [EntityDatabase]
         /// in order for the [DbIndex] to be properly updated. When that update happens can be controlled
         /// by the user, by directly applying it, or adding it to an earlier or later [Phase]
-        pub fn enable_index<I: DatabaseIndex<C> + 'static, C: Component>(&mut self) {
+        pub fn enable_index<I: DatabaseIndex<C> + 'static, C: Component>(&mut self, index: I) -> I::IndexingTransformation
+        where
+            I::IndexingTransformation: Default
+        {
             tracing::info!("enabling index {:?} for {:?}", std::any::type_name::<I>(), std::any::type_name::<C>());
-            return;
-            //self.index.insert(ComponentType::of::<C>(), DatabaseIndexType::default_from_type::<I, C>());
+
+            let ty = ComponentType::of::<C>();
+            let ix = DatabaseIndexType::from_index(index);
+            self.indice.insert(ty, ix);
+            
+            <I as DatabaseIndex<C>>::IndexingTransformation::default()
         }
         
         pub(crate) fn get_column(&self, key: &ColumnKey) -> Option<ColumnMapRef> {
             self.columns.get(key)
         }
-        
+
         pub(crate) fn get_column_mut(&self, key: &ColumnKey) -> Option<ColumnMapRefMut> {
             tracing::trace!(%key, "mutable column access");
             self.columns.get_mut(key)

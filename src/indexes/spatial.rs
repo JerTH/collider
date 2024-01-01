@@ -14,15 +14,16 @@ enum SpatialIndexEntry {
     InGrid(EntityId),
     
     /// Entry is in a nearby grid cell, but its influence extends
-    /// into this grid cell
-    Nearby(EntityId),
+    /// into this grid cell. We store the cell that the entity
+    /// actually resides in
+    Nearby(EntityId, SpatialIndexGridVector2D),
 }
 
 impl SpatialIndexEntry {
-    fn into_inner(&self) -> EntityId {
+    fn into_inner_entity(&self) -> EntityId {
         match self {
             SpatialIndexEntry::InGrid(entity) => *entity,
-            SpatialIndexEntry::Nearby(entity) => *entity,
+            SpatialIndexEntry::Nearby(entity, _) => *entity,
         }
     }
 }
@@ -40,7 +41,7 @@ impl Default for SpatialIndex {
 }
 
 impl SpatialIndex {
-    fn new(grid_size: f64) -> Self {
+    pub fn new(grid_size: f64) -> Self {
         Self { grid_size, hash_grid: HashMap::new(), }
     }
 
@@ -72,10 +73,12 @@ impl SpatialIndex {
 }
 
 impl<C> DatabaseIndex<C> for SpatialIndex where C: Component + Spatial {
+    type IndexingTransformation = SpatialIndexingTransformation<C>;
+
     fn indexed<'i>(&'i self) -> impl Iterator<Item = EntityId> + 'i {
         self.hash_grid.iter().map(|bucket| bucket.1).flatten().filter_map(|entry| match entry {
             SpatialIndexEntry::InGrid(entity) => Some(*entity),
-            SpatialIndexEntry::Nearby(_) => todo!(),
+            SpatialIndexEntry::Nearby(_, _) => todo!(),
         })
     }
 
@@ -93,25 +96,6 @@ impl<C> DatabaseIndex<C> for SpatialIndex where C: Component + Spatial {
     }
 }
 
-/// To allow indexes to be maintained, an [IndexingTransformation] must be
-/// implemented that performs the update. 
-struct SpatialIndexingTransformation<C: Component + Spatial> {
-    _phantom: PhantomData<C>,
-}
-
-
-impl<C: Component + Spatial> IndexingTransformation for SpatialIndexingTransformation<C> {
-    type Data = (EntityId, Read<C>);
-    type Index = SpatialIndex;
-
-    fn run(data: IndexingRows<Self::Data>, index: &mut Self::Index) -> TransformationResult {
-        for (entity, spatial) in data {
-            index.on_change(&entity, spatial)
-        }
-        Ok(())
-    }
-}
-
 
 /// Query a [SpatialIndex] for all entities within `max_distance` of `position`
 /// and optionally not closer than `min_distance`
@@ -121,8 +105,6 @@ pub struct Nearby<C> where C: Component + Spatial {
     pub max_distance: <C as Spatial>::S,
     pub min_distance: Option<<C as Spatial>::S>
 }
-
-
 
 impl<C: Component, T: Spatial + Component> IndexQuery<C> for Nearby<T>
 where
@@ -143,7 +125,7 @@ where
                 .flat_map(|cell| cell.iter())
                 .filter_map(|entry| match entry {
                     SpatialIndexEntry::InGrid(entity) => Some(*entity),
-                    SpatialIndexEntry::Nearby(_) => None,
+                    SpatialIndexEntry::Nearby(_, _) => None,
             });
             return iterator
         } else {
@@ -160,6 +142,39 @@ where
 impl<'i, C: Component + Spatial> Component for Nearby<C> {}
 
 
+
+/// To allow indexes to be maintained, an [IndexingTransformation] must be
+/// implemented which updates the [DatabaseIndex] with new data in the
+/// [crate::EntityDatabase]
+#[derive(Debug, Default, Clone)]
+pub struct SpatialIndexingTransformation<C: Component + Spatial> {
+    _phantom: PhantomData<C>,
+}
+
+impl<C: Component + Spatial> IndexingTransformation for SpatialIndexingTransformation<C> {
+    type Data = (EntityId, Read<C>);
+    type Index = SpatialIndex;
+
+    fn run(data: IndexingRows<Self::Data>, index: &mut Self::Index) -> TransformationResult {
+        for (entity, spatial) in data {
+            let (_size, position) = (spatial.size_radius(), spatial.position());
+            let (x, y, z) = position.as_f64_tuple();
+            let s = index.grid_size;
+            let grid = index.grid((x, y, z));
+
+            // Check if the entity is in the grid, and if it is then does
+            // the grid cell we calculated already contain it. If it doesn't
+            // contain it, then we have to move it
+            if index.hash_grid
+                .get(&grid)
+                .is_some_and(|item| !item.contains(&SpatialIndexEntry::InGrid(entity)))
+            {
+                todo!()
+            }
+        }
+        Ok(())
+    }
+}
 
 
 

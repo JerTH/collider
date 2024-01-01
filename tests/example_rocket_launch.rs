@@ -3,7 +3,7 @@ use std::ops::Rem;
 use std::collections::HashMap;
 use std::fmt::Debug;
 
-use collider::indexes::spatial::{Spatial, Nearby};
+use collider::indexes::spatial::{Spatial, Nearby, SpatialIndexingTransformation};
 use collider::transform::{Read, Phase};
 use collider::{*, transform::{Transformation, Write}};
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -29,8 +29,9 @@ pub fn rocket_launch() {
     let mut db = EntityDatabase::new();
     
     // Enables the [SpatialIndex], and associates it with the [Physics] component
-    db.enable_index::<SpatialIndex, Physics>();
-
+    let spatial_index = SpatialIndex::new(1000.0);
+    let _transform = db.enable_index::<SpatialIndex, Physics>(spatial_index);
+    
     let mission_control = db.create().unwrap();
     db.add_component(mission_control, MissionController::new()).unwrap();
     db.add_component(mission_control, Radio::default()).unwrap();
@@ -63,7 +64,7 @@ pub fn rocket_launch() {
     loop {
         loops += 1;
         phase.run_on(&db).unwrap();
-        
+
         if loops > 5 {
             break;
         }
