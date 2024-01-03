@@ -1,7 +1,7 @@
 use std::{
     cell::UnsafeCell,
     fmt::Display,
-    ptr::NonNull, any::Any, sync::atomic::AtomicBool,
+    ptr::NonNull, any::Any, sync::atomic::AtomicBool, marker::PhantomData,
 };
 
 use crate::{
@@ -29,6 +29,13 @@ impl<'b, C: Component> RawColumnRef<C> {
             ptr_components: self.ptr_components,
         }
     }
+}
+
+struct RawMultiColumnRef<R> {
+    borrows: Vec<BorrowRef>,
+    ptrs_entities: Vec<NonNull<Vec<EntityId>>>,
+    ptrs_components: Vec<NonNull<std::ffi::c_void>>,
+    marker: PhantomData<R>,
 }
 
 pub struct RawColumnRefMut<C> {

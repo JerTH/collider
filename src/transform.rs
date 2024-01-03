@@ -17,6 +17,7 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 use std::os::raw::c_void;
 use std::ptr::NonNull;
+use std::fmt::Debug;
 
 use crate::database::EntityDatabase;
 use crate::id::FamilyId;
@@ -204,18 +205,27 @@ impl<'db> Dependent for DynTransform<'db> {
     }
 }
 
+#[derive(Debug, Default, Clone)]
 pub struct Read<C: Component> {
     marker: PhantomData<C>,
 }
 
+#[derive(Debug, Default, Clone)]
 pub struct Write<C: Component> {
     marker: PhantomData<C>,
 }
 
 #[const_trait]
-pub trait ReadWrite {}
-impl<C> const ReadWrite for Read<C> where C: Component {}
-impl<C> const ReadWrite for Write<C> where C: Component {}
+pub trait ReadWrite {
+    type Component;
+}
+
+impl<C> const ReadWrite for Read<C> where C: Component {
+    type Component = C;
+}
+impl<C> const ReadWrite for Write<C> where C: Component {
+    type Component = C;
+}
 
 #[const_trait]
 pub trait MetaData {}

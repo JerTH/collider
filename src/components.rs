@@ -9,7 +9,9 @@ use crate::id::StableTypeId;
 /// 
 /// Users must implement this trait on any struct or enum they wish to
 /// use as components in an [crate::EntityDatabase]
-pub trait Component: Default + Debug + Clone + 'static {}
+pub trait Component: Default + Debug + Clone + 'static {
+    fn is_query_component() -> bool { false }
+}
 
 /// Component implementation for the unit type
 /// Every entity automatically gets this component when it's created

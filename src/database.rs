@@ -276,17 +276,17 @@ pub mod reckoning {
         /// The transformation must be added to a [Phase] and executed on this [EntityDatabase]
         /// in order for the [DbIndex] to be properly updated. When that update happens can be controlled
         /// by the user, by directly applying it, or adding it to an earlier or later [Phase]
-        pub fn enable_index<I: DatabaseIndex<C> + 'static, C: Component>(&mut self, index: I) -> I::IndexingTransformation
+        pub fn enable_index<I: DatabaseIndex + 'static>(&mut self, index: I) -> I::IndexingTransformation
         where
             I::IndexingTransformation: Default
         {
-            tracing::info!("enabling index {:?} for {:?}", std::any::type_name::<I>(), std::any::type_name::<C>());
-
-            let ty = ComponentType::of::<C>();
+            tracing::info!("enabling index {:?}", std::any::type_name::<I>());
+                        
+            let ty = ComponentType::of::<()>();
             let ix = DatabaseIndexType::from_index(index);
             self.indice.insert(ty, ix);
             
-            <I as DatabaseIndex<C>>::IndexingTransformation::default()
+            <I as DatabaseIndex>::IndexingTransformation::default()
         }
         
         pub(crate) fn get_column(&self, key: &ColumnKey) -> Option<ColumnMapRef> {

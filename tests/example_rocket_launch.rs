@@ -3,10 +3,9 @@ use std::ops::Rem;
 use std::collections::HashMap;
 use std::fmt::Debug;
 
-use collider::indexes::spatial::{Spatial, Nearby, SpatialIndexingTransformation};
+use collider::indexes::spatial::{Spatial, Nearby};
 use collider::transform::{Read, Phase};
 use collider::{*, transform::{Transformation, Write}};
-use tracing_subscriber::fmt::format::FmtSpan;
 
 use crate::indexes::spatial::SpatialIndex;
 
@@ -26,16 +25,22 @@ fn trace() {
 pub fn rocket_launch() {
     trace();
 
+    // Create a new database
     let mut db = EntityDatabase::new();
     
+    // Setup Indexes
+
     // Enables the [SpatialIndex], and associates it with the [Physics] component
     let spatial_index = SpatialIndex::new(1000.0);
-    let _transform = db.enable_index::<SpatialIndex, Physics>(spatial_index);
-    
+    let _transform = db.enable_index::<SpatialIndex<Physics>>(spatial_index);
+
+    // Create our first entity, this one will be a mission controller that will
+    // tell our rocket(s) when to launch
     let mission_control = db.create().unwrap();
     db.add_component(mission_control, MissionController::new()).unwrap();
     db.add_component(mission_control, Radio::default()).unwrap();
 
+    // Create our rocket(s), give them some random performance values
     let mut rockets = Vec::new();
     for i in 0..3u64 {
         let rand: f64 = (0..8).fold(3029487435683079979u64, |a, j: u64| 
@@ -53,17 +58,24 @@ pub fn rocket_launch() {
         rockets.push(rocket)
     }
 
-    let mut phase = Phase::new();
-    phase.add_transformation(RadioSystem {});
-    phase.add_transformation(RocketSystem {});
-    phase.add_transformation(PhysicsSystem {});
-    phase.add_transformation(MissionControlSystem {});
-    phase.add_transformation(RocketAvionicsSystem {});
+    // Setup our transformation phase. When a phase is run on a database, its
+    // transformations are analyzed and anything that can run in parallel
+    // automatically does so, but only the contents of one phase are run at
+    // a time. This means that if for example you want UI to be guaranteed to render
+    // after everything else, you can simply put any UI rendering transformations
+    // into a separate phase and run it after everything else.
+    let mut rocket_sim = Phase::new();
+    rocket_sim.add_transformation(RadioSystem {});
+    rocket_sim.add_transformation(RocketSystem {});
+    rocket_sim.add_transformation(PhysicsSystem {});
+    rocket_sim.add_transformation(MissionControlSystem {});
+    rocket_sim.add_transformation(RocketAvionicsSystem {});
     
     let mut loops = 0;
     loop {
         loops += 1;
-        phase.run_on(&db).unwrap();
+
+        rocket_sim.run_on(&db).unwrap();
 
         if loops > 5 {
             break;
@@ -85,13 +97,8 @@ impl Spatial for Physics {
     type V = (f64, f64, f64);
     type S = f64;
 
-    fn position(&self) -> Self::V {
-        (0.0, 0.0, self.altitude)
-    }
-
-    fn size_radius(&self) -> Self::S {
-        0.0
-    }
+    fn position(&self) -> Self::V { (0.0, 0.0, self.altitude) }
+    fn size_radius(&self) -> Self::S { 0.0 }
 }
 
 #[derive(Default, Debug, Clone)]
@@ -187,34 +194,6 @@ pub struct Radio {
 }
 
 impl Component for Radio {}
-
-struct ProximitySystem {}
-
-//use transform::Rows;
-//impl Transformation for ProximitySystem {
-//    // This means, iterate every entity that has both a [Physics] and an [Avionics]
-//    // component, and also get a [Nearby] index query which iterates the [Physics]
-//    // components of every entity that meets the [Nearby] queries critera.
-//    // In this case, [Nearby] implements a simple spatial hash index on [Physics]
-//    // components
-//    type Data = (Read<Physics>, Write<Avionics>, Nearby<Read<Physics>>);
-//    
-//    fn run(data: Rows<Self::Data>) -> transform::TransformationResult {
-//        for (physics, avionics, nearby) in data {
-//            let mut too_close = false;
-//            let this = nearby.this();
-//            
-//            for other in nearby {
-//                
-//            }
-//
-//            if too_close {
-//                avionics.state = AvionicsState::Abort;
-//            }
-//        }
-//        Ok(())
-//    }
-//}
 
 struct PhysicsSystem {}
 impl Transformation for PhysicsSystem {

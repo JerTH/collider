@@ -10,6 +10,10 @@
 pub mod macros {
     #[macro_export]
     macro_rules! impl_transformations {
+        ($($t:ident, $i:tt),*(($qt:ident, $qi:tt),*)) => {
+
+        };
+
         ($([$t:ident, $i:tt]),*) => {
             #[allow(unused_parens)]
             impl<'db, $($t),+> Iterator for crate::transform::RowIter<'db, ($($t),+)>
@@ -134,3 +138,4 @@ impl_transformations!([A, 0], [B, 1], [C, 2], [D, 3], [E, 4]);
 impl_transformations!([A, 0], [B, 1], [C, 2], [D, 3], [E, 4], [F, 5]);
 impl_transformations!([A, 0], [B, 1], [C, 2], [D, 3], [E, 4], [F, 5], [G, 6]);
 impl_transformations!([A, 0], [B, 1], [C, 2], [D, 3], [E, 4], [F, 5], [G, 6], [H, 7]);
+

@@ -5,7 +5,7 @@
 //! Indexes (Indices) are used to speed up access into the [EntityDatabase] for more
 //! specialized queries
 use std::{fmt::Debug, marker::PhantomData};
-use crate::{Component, EntityId, components::ComponentType, database::reckoning::AnyPtr, EntityDatabase, transform::{Rows, TransformationResult}, column::ColumnKey};
+use crate::{Component, EntityId, components::ComponentType, database::reckoning::AnyPtr, EntityDatabase, transform::{Rows, TransformationResult, Selection, ReadWrite}, column::ColumnKey, Read};
 
 /// A [DatabaseIndex] describes an index of data stored adjacent to an [EntityDatabase] which
 /// organizes its own list of [EntityId]'s it's interested in based on some [Component] data.
@@ -20,7 +20,7 @@ use crate::{Component, EntityId, components::ComponentType, database::reckoning:
 /// list of entities which match whatever predicate the query is meant to satisfy.
 /// This list of entities is then used to accelerate a [Transformation] being executed
 /// on the [EntityDatabase]
-pub trait DatabaseIndex<C: Component>: Default {
+pub trait DatabaseIndex: Default {
 
     /// An [IndexingTransformation] is a special transformation
     /// run on an [EntityDatabase] specifically for updating
@@ -31,34 +31,43 @@ pub trait DatabaseIndex<C: Component>: Default {
     /// by an [IndexQuery] later
     type IndexingTransformation: IndexingTransformation;
 
+    type Data: Selection;
+
     /// Returns an iterator over every [EntityId] currently tracked
     /// by the [EntityDatabase]
     fn indexed<'i>(&'i self) -> impl Iterator<Item = EntityId> + 'i;
 
-    /// Called whenever a component we're interested in changes
-    fn on_change<'i>(&'i self, entity: &EntityId, new_value: &C);
-
-    /// Runs an [IndexQuery] on a [DatabaseIndex], returning an iterator over its results
-    fn query<'i, Q: IndexQuery<C> + 'i>(index: &'i Q::Index, query: Q) -> impl Iterator<Item = EntityId> + 'i
-    where
-        <Q as IndexQuery<C>>::Index: DatabaseIndex<C>,
-    {
-        Q::on_index(query, &index)
-    }
+    ///// Runs an [IndexQuery] on a [DatabaseIndex], returning an iterator over its results
+    //fn query<'i, Q: IndexQuery<C> + 'i>(index: &'i Q::Index, query: Q) -> impl Iterator<Item = EntityId> + 'i
+    //where
+    //    <Q as IndexQuery<C>>::Index: DatabaseIndex<C>,
+    //{
+    //    Q::on_index(query, &index)
+    //}
 }
 
 /// An [IndexQuery] represents a question to be asked of a [DatabaseIndex] attached
 /// to an [EntityDatabase]
-pub trait IndexQuery<C: Component> {
+pub trait IndexQuery {
     type Index;
-    type Component;
+    type Data;
 
     fn on_index<'i>(query: Self, index: &'i Self::Index) -> impl Iterator<Item = EntityId> + 'i
     where
-        Self::Index: DatabaseIndex<C>;
+        Self::Index: DatabaseIndex;
 }
 
-struct RealQuery<'db, I: DatabaseIndex<C>, C:Component> {
+impl<Q, I: DatabaseIndex> Component for Q
+where
+    Q: Debug + Default + Clone + 'static,
+    Q: IndexQuery<Index = I, Data = <I as DatabaseIndex>::Data>,
+    <I as DatabaseIndex>::Data: Selection,
+    <I as DatabaseIndex>::IndexingTransformation: IndexingTransformation,
+{
+    fn is_query_component() -> bool { true }
+}
+
+struct RealQuery<'db, I: DatabaseIndex, C: Component> {
     index: &'db I,
     _phantom: PhantomData<C>,
 }
@@ -87,7 +96,7 @@ impl<'db, C: Component> Iterator for QueryIter<'db, C> {
     }
 }
 
-impl<'db, C: Component, I: DatabaseIndex<C>> IntoIterator for RealQuery<'db, I, C>
+impl<'db, C: Component, I: DatabaseIndex> IntoIterator for RealQuery<'db, I, C>
 {
     type Item = &'db C;
     type IntoIter = QueryIter<'db, C>;
@@ -104,14 +113,12 @@ pub trait Index<I> {}
 /// Encapsulates a real [DatabaseIndex]
 #[derive(Debug)]
 pub struct DatabaseIndexType {
-    associated_type: ComponentType,
     ptr_index: AnyPtr,
 }
 
 impl DatabaseIndexType {
-    pub fn from_index<I: DatabaseIndex<C> + 'static, C: Component>(index: I) -> Self {
+    pub fn from_index<I: DatabaseIndex + 'static>(index: I) -> Self {
         Self {
-            associated_type: ComponentType::of::<C>(),
             ptr_index: AnyPtr::from(Box::new(index)),
         }
     }

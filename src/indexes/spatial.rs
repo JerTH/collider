@@ -1,7 +1,8 @@
 /// Implementation of a simple spatial index for an [EntityDatabase]
 
 use std::{collections::HashMap, ops::Div, fmt::Debug, marker::PhantomData};
-use crate::{EntityId, Component, indexing::{DatabaseIndex, IndexQuery, IndexingTransformation, IndexingRows}, Read, transform::{Rows, TransformationResult}};
+
+use crate::{EntityId, Component, indexing::{DatabaseIndex, IndexQuery, IndexingTransformation, IndexingRows}, Read, transform::{TransformationResult, ReadWrite, SelectOne, Selection}};
 
 
 
@@ -29,20 +30,21 @@ impl SpatialIndexEntry {
 }
 
 #[derive(Debug, Clone)]
-pub struct SpatialIndex {
+pub struct SpatialIndex<C: Component + Spatial> {
     grid_size: f64,
     hash_grid: HashMap<SpatialIndexGridVector2D, Vec<SpatialIndexEntry>>,
+    _phantom: PhantomData<C>,
 }
 
-impl Default for SpatialIndex {
+impl<C: Component + Spatial> Default for SpatialIndex<C> {
     fn default() -> Self {
         Self::new(1000.0)
     }
 }
 
-impl SpatialIndex {
+impl<C: Component + Spatial> SpatialIndex<C> {
     pub fn new(grid_size: f64) -> Self {
-        Self { grid_size, hash_grid: HashMap::new(), }
+        Self { grid_size, hash_grid: HashMap::new(), _phantom: PhantomData }
     }
 
     fn grid(&self, position: (f64, f64, f64)) -> SpatialIndexGridVector2D {
@@ -72,8 +74,9 @@ impl SpatialIndex {
     }
 }
 
-impl<C> DatabaseIndex<C> for SpatialIndex where C: Component + Spatial {
+impl<C: Component + Spatial> DatabaseIndex for SpatialIndex<C> where C: Component + Spatial {
     type IndexingTransformation = SpatialIndexingTransformation<C>;
+    type Data = <SpatialIndexingTransformation<C> as IndexingTransformation>::Data;
 
     fn indexed<'i>(&'i self) -> impl Iterator<Item = EntityId> + 'i {
         self.hash_grid.iter().map(|bucket| bucket.1).flatten().filter_map(|entry| match entry {
@@ -82,36 +85,36 @@ impl<C> DatabaseIndex<C> for SpatialIndex where C: Component + Spatial {
         })
     }
 
-    fn on_change(&self, entity: &EntityId, new_value: &C) {
-        let (_size, position) = (new_value.size_radius(), new_value.position());
-        let (x, y, z) = position.as_f64_tuple();
-        let s = self.grid_size;
-        let grid = self.grid((x, y, z));
-
-        if self.hash_grid.get(&grid).is_some_and(|item| item.contains(&SpatialIndexEntry::InGrid(*entity))) {
-            return;
-        } else {
-            todo!()
-        }
-    }
+    //fn on_change(&self, entity: &EntityId, new_value: &C) {
+    //    let (_size, position) = (new_value.size_radius(), new_value.position());
+    //    let (x, y, z) = position.as_f64_tuple();
+    //    let s = self.grid_size;
+    //    let grid = self.grid((x, y, z));
+    //
+    //    if self.hash_grid.get(&grid).is_some_and(|item| item.contains(&SpatialIndexEntry::InGrid(*entity))) {
+    //        return;
+    //    } else {
+    //        todo!()
+    //    }
+    //}
 }
-
 
 /// Query a [SpatialIndex] for all entities within `max_distance` of `position`
 /// and optionally not closer than `min_distance`
 #[derive(Debug, Default, Clone)]
-pub struct Nearby<C> where C: Component + Spatial {
-    pub position: <C as Spatial>::V,
-    pub max_distance: <C as Spatial>::S,
-    pub min_distance: Option<<C as Spatial>::S>
+pub struct Nearby<Q> where Q: Selection {
+    pub position: (f64, f64, f64),
+    pub max_distance: f64,
+    pub min_distance: Option<f64>,
+    marker: PhantomData<Q>,
 }
 
-impl<C: Component, T: Spatial + Component> IndexQuery<C> for Nearby<T>
+impl<Q: Component + Spatial> IndexQuery for Nearby<Q>
 where
-    C: Component + Spatial
+    Q: Selection,
 {
-    type Index = SpatialIndex;
-    type Component = C;
+    type Index = SpatialIndex<Q>;
+    type Data = Q;
     
     fn on_index<'db>(query: Self, index: &'db Self::Index) -> impl Iterator<Item = EntityId> + 'db {
         let (query_location, query_radius) = (query.position.as_f64_tuple(), query.max_distance.as_f64());
@@ -136,10 +139,9 @@ where
 
 
 
-
-/// In order to allow [IndexQuery]'s to use the normal [Transformation]
-/// iterator syntax, they must implement [Component]. 
-impl<'i, C: Component + Spatial> Component for Nearby<C> {}
+///// In order to allow [IndexQuery]'s to use the normal [Transformation]
+///// iterator syntax, they must implement [Component]. 
+//impl<'i, C: Component + Spatial> Component for Nearby<C> {}
 
 
 
@@ -153,7 +155,7 @@ pub struct SpatialIndexingTransformation<C: Component + Spatial> {
 
 impl<C: Component + Spatial> IndexingTransformation for SpatialIndexingTransformation<C> {
     type Data = (EntityId, Read<C>);
-    type Index = SpatialIndex;
+    type Index = SpatialIndex<C>;
 
     fn run(data: IndexingRows<Self::Data>, index: &mut Self::Index) -> TransformationResult {
         for (entity, spatial) in data {
@@ -196,6 +198,23 @@ pub trait Spatial {
 
     fn position(&self) -> Self::V;
     fn size_radius(&self) -> Self::S;
+}
+
+impl<T, C> Spatial for T
+where
+    T: ReadWrite<Component = C>,
+    C: Spatial,
+{
+    type V = <C as Spatial>::V;
+    type S = <C as Spatial>::S;
+
+    fn position(&self) -> Self::V {
+        todo!()
+    }
+
+    fn size_radius(&self) -> Self::S {
+        todo!()
+    }
 }
 
 /// Float type generic over f32 and f64
