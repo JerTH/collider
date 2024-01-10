@@ -3,12 +3,19 @@
 //! Functionality related to transforming data contained in an
 //! [crate::database::reckoning::EntityDatabase]
 
+use collider_core::*;
+use collider_core::id::ColumnKey;
+use collider_core::id::FamilyId;
+use collider_core::id::FamilyIdSet;
+use collider_core::indexing::IndexQuery;
+use collider_core::results::PhaseResult;
+use collider_core::results::TransformationResult;
+use collider_core::select::SelectOne;
+use collider_core::component::ComponentType;
+use collider_core::select::Selects;
 use crate::borrowed::RawBorrow;
-use crate::column::ColumnKey;
 use crate::column::RawColumnRef;
 use crate::column::RawColumnRefMut;
-use crate::components::Component;
-use crate::components::ComponentType;
 use crate::components::ComponentTypeSet;
 use crate::conflict::ConflictGraph;
 use crate::conflict::Dependent;
@@ -20,8 +27,6 @@ use std::ptr::NonNull;
 use std::fmt::Debug;
 
 use crate::database::EntityDatabase;
-use crate::id::FamilyId;
-use crate::id::FamilyIdSet;
 
 pub struct Phase<'db> {
     subphases: Vec<HashMap<TransformationId, DynTransform<'db>>>,
@@ -116,7 +121,7 @@ pub trait Transformation: 'static {
     /// Run the [Transformation] with a set of 
     fn run(data: Rows<Self::Data>) -> TransformationResult;
 
-    fn messages(messages: Messages) {}
+    fn messages(_: Messages) {}
 
     /// Returns a unique identifier for a given transformation impl
     fn id() -> TransformationId
@@ -205,14 +210,88 @@ impl<'db> Dependent for DynTransform<'db> {
     }
 }
 
+/// Shared Read Access
+/// 
+/// Tags a component selection with immutable shared access. When a selection is tagged
+/// with this accessor, read-only shared access is granted. Many transformations can read
+/// the same component at the same time, but it is guaranteed that no transformations will
+/// attempt to gain write access while any reads are occuring.
 #[derive(Debug, Default, Clone)]
 pub struct Read<C: Component> {
     marker: PhantomData<C>,
 }
 
+impl<'db, C> const SelectOne<'db> for Read<C>
+where
+    Self: 'db,
+    C: Component,
+{
+    type Type = C;
+    type Ref = &'db Self::Type;
+    type BorrowType = RawColumnRef<C>;
+}
+
+impl<C: Component> Selects for Read<C> {
+    const READS: &'static [ComponentType] = &[ComponentType::of::<C>()];
+    const WRITES: &'static [ComponentType] = &[];
+    const GLOBAL: &'static [ComponentType] = &[];
+}
+
+/// Exclusive Write Access
+/// 
+/// Tags a component selection as exclusive access. When a selection is tagged with
+/// this accessor, it is guaranteed that no other transformation will attempt to access
+/// this component at the same time, for reads or writes.
 #[derive(Debug, Default, Clone)]
 pub struct Write<C: Component> {
     marker: PhantomData<C>,
+}
+
+impl<'db, C> const SelectOne<'db> for Write<C>
+where
+    Self: 'db,
+    C: Component,
+{
+    type Type = C;
+    type Ref = &'db mut Self::Type;
+    type BorrowType = RawColumnRefMut<C>;
+}
+
+impl<C: Component> Selects for Write<C> {
+    const READS: &'static [ComponentType] = &[];
+    const WRITES: &'static [ComponentType] = &[ComponentType::of::<C>()];
+    const GLOBAL: &'static [ComponentType] = &[];
+}
+
+/// Global Component Access
+/// 
+/// Tags a component selection as globally accessed. Global components always
+/// return exactly one component as an immutable reference. This is useful for things
+/// like time keeping.
+/// 
+/// Despite it only being possible to access global components immutably in regular
+/// transformations, interior mutability from transformations is still possible using
+/// appropriate synchronization mechanisms. Care must be taken, however, as at any
+/// point in time there may be many systems attempting to access the global component.
+#[derive(Debug, Default, Clone)]
+pub struct Global<C: Component> {
+    marker: PhantomData<C>,
+}
+
+impl<C: Component> Selects for Global<C> {
+    const READS: &'static [ComponentType] = &[];
+    const WRITES: &'static [ComponentType] = &[];
+    const GLOBAL: &'static [ComponentType] = &[ComponentType::of::<C>()];
+}
+
+impl<'db, C> const SelectOne<'db> for Global<C>
+where
+    Self: 'db,
+    C: Component,
+{
+    type Type = C;
+    type Ref = &'db Self::Type;
+    type BorrowType = RawColumnRef<C>;
 }
 
 #[const_trait]
@@ -289,48 +368,8 @@ impl<'db, RTuple> Rows<'db, RTuple> {
     }
 }
 
-#[const_trait]
-pub trait SelectOne<'db> {
-    type Ref;
-    type Type;
-    type BorrowType;
 
-    fn reads() -> Option<ComponentType> {
-        None
-    }
 
-    fn writes() -> Option<ComponentType> {
-        None
-    }
-}
-
-impl<'db, C> const SelectOne<'db> for Read<C>
-where
-    Self: 'db,
-    C: Component,
-{
-    type Ref = &'db Self::Type;
-    type Type = C;
-    type BorrowType = RawColumnRef<C>;
-
-    fn reads() -> Option<ComponentType> {
-        Some(ComponentType::of::<Self::Type>())
-    }
-}
-
-impl<'db, C> const SelectOne<'db> for Write<C>
-where
-    Self: 'db,
-    C: Component,
-{
-    type Ref = &'db mut Self::Type;
-    type Type = C;
-    type BorrowType = RawColumnRefMut<C>;
-
-    fn writes() -> Option<ComponentType> {
-        Some(ComponentType::of::<Self::Type>())
-    }
-}
 
 #[const_trait]
 pub trait Selection {
@@ -346,7 +385,3 @@ pub trait Reads {}
 pub trait Writes {}
 pub struct RwSet {}
 
-#[derive(Debug)]
-pub enum TransformationError {}
-pub type TransformationResult = Result<(), TransformationError>;
-pub type PhaseResult = Result<(), Vec<TransformationError>>;

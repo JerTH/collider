@@ -2,113 +2,45 @@
 pub mod reckoning {
     use core::fmt;
     // misc
-    use std::any::Any;
     use std::error::Error;
     use std::fmt::Debug;
     use std::fmt::Display;
     use std::hash::Hash;
-
-    // sync
-    use std::sync::atomic::AtomicU32;
-    use std::sync::atomic::Ordering;
-    use std::sync::Arc;
-    use std::sync::Mutex;
-    use std::sync::PoisonError;
     
+    // sync
+    use std::sync::Arc;
+    
+    // core
+    use collider_core::*;
+    use collider_core::id::ColumnKey;
+    use collider_core::id::FamilyId;
+    use collider_core::id::FamilyIdSet;
+    use collider_core::indexing::DatabaseIndex;
+    use collider_core::indexing::DatabaseIndexType;
+    use collider_core::mapping::GetDbMap;
+    use collider_core::component::ComponentType;
+
     // crate
     use crate::column::Column;
     use crate::column::ColumnHeader;
     use crate::column::ColumnInner;
-    use crate::column::ColumnKey;
     use crate::column::ColumnMoveResult;
     use crate::column::ColumnSwapRemoveResult;
-    use crate::components::Component;
     use crate::components::ComponentDelta;
-    use crate::components::ComponentType;
     use crate::components::ComponentTypeSet;
-    use crate::id::*;
-    use crate::indexing::DatabaseIndex;
-    use crate::indexing::DatabaseIndexType;
-    use crate::indexing::IndexingTransformation;
+    use crate::entity::EntityAllocError;
+    use crate::entity::EntityAllocator;
+    use crate::error::DbError;
     use crate::mapping::DbMaps;
-    use crate::mapping::GetDbMap;
     use crate::table::*;
-    use crate::EntityId;
     use crate::transfer::TransferEdge;
     use crate::transfer::TransferGraph;
 
-    // typedefs
-    pub(crate) type AnyPtr = Box<dyn Any>;
-
+    // external
     use dashmap::DashMap;
     use dashmap::try_result::TryResult as DashMapTryResult;
     use dashmap::mapref::one::Ref as DashMapRef;
-        
-
-    #[derive(Debug)]
-    enum EntityAllocError {
-        PoisonedFreeList,
-    }
-
-    impl Display for EntityAllocError {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            match self {
-                EntityAllocError::PoisonedFreeList => write!(f, "poisoned free list mutex"),
-            }
-        }
-    }
-
-    impl Error for EntityAllocError {}
-
-    type EntityAllocResult = Result<EntityId, EntityAllocError>;
-
-    impl<T> std::convert::From<PoisonError<T>> for EntityAllocError {
-        fn from(_: PoisonError<T>) -> Self {
-            EntityAllocError::PoisonedFreeList
-        }
-    }
-
-    #[derive(Debug)]
-    pub struct EntityAllocator {
-        count: AtomicU32,
-        free: Mutex<Vec<EntityId>>,
-    }
-
-    impl EntityAllocator {
-        fn new() -> Self {
-            Self {
-                count: AtomicU32::new(0),
-                free: Default::default(),
-            }
-        }
-
-        fn alloc(&self) -> EntityAllocResult {
-            // TODO: Better allocator
-            
-            let mut guard = self.free.lock()?;
-
-            match guard.pop() {
-                Some(id) => {
-                    // SAFETY:
-                    // Accessing union fields is implicitely unsafe - here we copy
-                    // one union to another with the same accessor which is safe
-                    let idunion = unsafe {
-                        IdUnion {
-                            generational: id.generational,
-                        }
-                    };
-                    Ok(EntityId(idunion))
-                }
-                None => {
-                    let count = self.count.fetch_add(1u32, Ordering::SeqCst);
-                    Ok(EntityId(IdUnion {
-                        generational: (count, 0, 0, 0),
-                    }))
-                }
-            }
-        }
-    }
-
+    
     #[derive(Debug)]
     pub enum CreateEntityError {
         IdAllocatorError,
@@ -140,83 +72,7 @@ pub mod reckoning {
         }
     }
 
-    #[derive(Debug)]
-    pub enum DbError {
-        EntityDoesntExist(EntityId),
-        FailedToResolveTransfer,
-        FailedToFindEntityFamily(EntityId),
-        FailedToFindFamilyForSet(ComponentTypeSet),
-        EntityBelongsToUnknownFamily,
-        FailedToAcquireMapping,
-        ColumnTypeDiscrepancy,
-        ColumnAccessOutOfBounds,
-        TableDoesntExistForFamily(FamilyId),
-        ColumnDoesntExistInTable,
-        EntityNotInTable(EntityId, FamilyId),
-        UnableToAcquireTablesLock(String),
-        FamilyDoesntExist(FamilyId),
-        UnableToAcquireLock,
-        MoveWithSameColumn,
-    }
-
-    impl Error for DbError {}
-
-    impl Display for DbError {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            match self {
-                DbError::EntityDoesntExist(entity) => {
-                    write!(f, "entity {:?} doesn't exist", entity)
-                }
-                DbError::FailedToResolveTransfer => {
-                    write!(f, "failed to transfer entity between families")
-                }
-                DbError::FailedToFindEntityFamily(entity) => {
-                    write!(f, "failed to find a family for entity {:?}", entity)
-                }
-                DbError::FailedToFindFamilyForSet(set) => {
-                    write!(
-                        f,
-                        "failed to find a family for the set of components {}",
-                        set
-                    )
-                }
-                DbError::EntityBelongsToUnknownFamily => {
-                    write!(f, "requested family data is unknown or invalid")
-                }
-                DbError::FailedToAcquireMapping => {
-                    write!(f, "failed to acquire requested mapping")
-                }
-                DbError::ColumnTypeDiscrepancy => {
-                    write!(f, "column type mismatch")
-                }
-                DbError::ColumnAccessOutOfBounds => {
-                    write!(f, "attempted to index a column out of bounds")
-                }
-                DbError::TableDoesntExistForFamily(family) => {
-                    write!(f, "table doesn't exist for the given family id {}", family)
-                }
-                DbError::ColumnDoesntExistInTable => {
-                    write!(f, "column doesn't exist in the given table")
-                }
-                DbError::EntityNotInTable(entity, family) => {
-                    write!(f, "{:?} does not exist in {:?} data table", entity, family)
-                }
-                DbError::UnableToAcquireTablesLock(reason) => {
-                    write!(f, "unable to acquire master table lock: {}", reason)
-                }
-                DbError::FamilyDoesntExist(family) => {
-                    write!(f, "family doesn't exist: {}", family)
-                }
-                DbError::UnableToAcquireLock => {
-                    write!(f, "failed to acquire poisoned lock")
-                }
-                DbError::MoveWithSameColumn => {
-                    write!(f, "attempted to move a component to the column it was already in")
-                }
-            }
-        }
-    }
-
+    
     #[derive(Debug)]
     pub struct EntityDatabase {
         allocator: EntityAllocator,
@@ -243,9 +99,8 @@ pub mod reckoning {
 
     pub(crate) type ColumnMapRef<'db> = dashmap::mapref::one::Ref<'db, ColumnKey, Column>;
     pub(crate) type ColumnMapRefMut<'db> = dashmap::mapref::one::RefMut<'db, ColumnKey, Column>;
-
     pub(crate) type TableMapRef<'db> = dashmap::mapref::one::Ref<'db, FamilyId, Table>;
-
+    
     impl EntityDatabase {
         /// Creates a new [EntityDatabase]
         pub fn new() -> Self {
@@ -281,7 +136,7 @@ pub mod reckoning {
             I::IndexingTransformation: Default
         {
             tracing::info!("enabling index {:?}", std::any::type_name::<I>());
-                        
+
             let ty = ComponentType::of::<()>();
             let ix = DatabaseIndexType::from_index(index);
             self.indice.insert(ty, ix);
@@ -297,7 +152,7 @@ pub mod reckoning {
             tracing::trace!(%key, "mutable column access");
             self.columns.get_mut(key)
         }
-        
+
         pub(crate) fn insert_column(&self, key: ColumnKey, column: Column) {
             tracing::trace!(%key, "mutable column access: inserting new column");
             self.columns.insert(key, column);
@@ -313,52 +168,6 @@ pub mod reckoning {
 
         pub(crate) fn get_table(&self, family: &FamilyId) -> Option<TableMapRef> {
             self.tables.get(family)
-        }
-        
-        pub fn update_mapping<'db, K: Debug + Clone + Eq + Hash + 'db, V: Debug + Clone + 'db>(
-            &'db self,
-            key: &'db K,
-            value: &'db V,
-        ) -> Result<(), DbError>
-        where
-            DbMaps: GetDbMap<'db, (K, V)>,
-        {
-            let mut guard = self
-                .maps
-                .mut_map::<(K, V)>()
-                .ok_or(DbError::FailedToAcquireMapping)?;
-
-            guard.insert(key.clone(), value.clone());
-            Ok(())
-        }
-
-        pub fn delete_mapping<'db, K: Debug + Clone + Eq + Hash + 'db, V: Debug + Clone + 'db>(
-            &'db self,
-            key: &'db K,
-        ) -> Result<(), DbError>
-        where
-            DbMaps: GetDbMap<'db, (K, V)>,
-        {
-            tracing::trace!(
-                k = ?key,
-                v_type = std::any::type_name::<V>(),
-                "deleting mapping"
-            );
-
-            let mut guard = self
-                .maps
-                .mut_map::<(K, V)>()
-                .ok_or(DbError::FailedToAcquireMapping)?;
-
-            guard.remove(key);
-            Ok(())
-        }
-
-        pub fn query_mapping<'db, K: Eq + Hash, V: Clone + 'db>(&'db self, key: &'db K) -> Option<V>
-        where
-            DbMaps: GetDbMap<'db, (K, V)>,
-        {
-            self.maps.get_map::<(K, V)>(key)
         }
 
         /// Creates an entity, returning its [EntityId]
@@ -994,6 +803,60 @@ pub mod reckoning {
 
             Ok(())
         }
+
+        pub(crate) fn query_mapping<'db, K, V> (
+            &'db self,
+            key: &'db K
+        ) -> Option<V>
+        where
+            K: Eq + Hash,
+            V: Clone + 'db,
+            DbMaps: GetDbMap<'db, (K, V)>,
+        {
+            self.maps.get_map::<(K, V)>(key)
+        }
+        
+        pub(crate) fn delete_mapping<'db, K, V>(
+            &'db self,
+            key: &'db K,
+        ) -> Result<(), DbError>
+        where
+            K: Debug + Clone + Eq + Hash + 'db,
+            V: Debug + Clone + 'db,
+            DbMaps: GetDbMap<'db, (K, V)>,
+        {
+            tracing::trace!(
+                k = ?key,
+                v_type = std::any::type_name::<V>(),
+                "deleting mapping"
+            );
+
+            let mut guard = self.maps
+                .mut_map::<(K, V)>()
+                .ok_or(DbError::FailedToAcquireMapping)?;
+
+            guard.remove(key);
+            Ok(())
+        }
+        
+        pub(crate) fn update_mapping<'db, K, V> (    
+            &'db self,
+            key: &'db K,
+            value: &'db V,
+        ) -> Result<(), DbError>
+        where
+            K: Debug + Clone + Eq + Hash + 'db,
+            V: Debug + Clone + 'db,
+            DbMaps: GetDbMap<'db, (K, V)>,
+        {
+            let mut guard = self
+                .maps
+                .mut_map::<(K, V)>()
+                .ok_or(DbError::FailedToAcquireMapping)?;
+                
+            guard.insert(key.clone(), value.clone());
+            Ok(())
+        }
     }
 
     impl Display for EntityDatabase {
@@ -1039,12 +902,12 @@ pub mod reckoning {
         
     } // transfer ======================================================================
 
-    pub trait GetAsRefType<'db, S: crate::transform::SelectOne<'db>, R> {
+    pub trait GetAsRefType<'db, S: collider_core::select::SelectOne<'db>, R> {
         unsafe fn get_as_ref_type(&self, index: usize) -> Option<R>;
     }
     
     // Type system gymnastics
-    impl<'db, S: crate::transform::SelectOne<'db>> GetAsRefType<'db, S, &'db S::Type> for *mut Vec<<S as crate::transform::SelectOne<'db>>::Type>
+    impl<'db, S: collider_core::select::SelectOne<'db>> GetAsRefType<'db, S, &'db S::Type> for *mut Vec<<S as collider_core::select::SelectOne<'db>>::Type>
     {
         #[inline(always)]
         unsafe fn get_as_ref_type(&self, index: usize) -> Option<&'db S::Type> {
@@ -1052,7 +915,7 @@ pub mod reckoning {
         }
     }
 
-    impl<'db, S: crate::transform::SelectOne<'db>> GetAsRefType<'db, S, &'db mut S::Type> for *mut Vec<<S as crate::transform::SelectOne<'db>>::Type>
+    impl<'db, S: collider_core::select::SelectOne<'db>> GetAsRefType<'db, S, &'db mut S::Type> for *mut Vec<<S as collider_core::select::SelectOne<'db>>::Type>
     {
         #[inline(always)]
         unsafe fn get_as_ref_type(&self, index: usize) -> Option<&'db mut S::Type> {

@@ -1,15 +1,14 @@
 /// Implementation of a simple spatial index for an [EntityDatabase]
 
 use std::{collections::HashMap, ops::Div, fmt::Debug, marker::PhantomData};
-
-use crate::{EntityId, Component, indexing::{DatabaseIndex, IndexQuery, IndexingTransformation, IndexingRows}, Read, transform::{TransformationResult, ReadWrite, SelectOne, Selection}};
-
+use collider_core::{*, indexing::{DatabaseIndex, IndexingTransformation, IndexQuery, IndexingRows, IndexQuerySelection}, results::TransformationResult, select::Selects};
+use crate::{EntityId, Read};
 
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct SpatialIndexGridVector2D(i32, i32);
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum SpatialIndexEntry {
     /// Entry is in this grid cell
     InGrid(EntityId),
@@ -21,7 +20,7 @@ enum SpatialIndexEntry {
 }
 
 impl SpatialIndexEntry {
-    fn into_inner_entity(&self) -> EntityId {
+    pub fn into_inner_entity(&self) -> EntityId {
         match self {
             SpatialIndexEntry::InGrid(entity) => *entity,
             SpatialIndexEntry::Nearby(entity, _) => *entity,
@@ -102,21 +101,36 @@ impl<C: Component + Spatial> DatabaseIndex for SpatialIndex<C> where C: Componen
 /// Query a [SpatialIndex] for all entities within `max_distance` of `position`
 /// and optionally not closer than `min_distance`
 #[derive(Debug, Default, Clone)]
-pub struct Nearby<Q> where Q: Selection {
+pub struct Nearby<C, S>
+where
+    C: Component + Spatial,
+    S: IndexQuerySelection,
+{
     pub position: (f64, f64, f64),
     pub max_distance: f64,
     pub min_distance: Option<f64>,
-    marker: PhantomData<Q>,
+    _marker_q: PhantomData<S>,
+    _marker_c: PhantomData<C>,
 }
 
-impl<Q: Component + Spatial> IndexQuery for Nearby<Q>
+impl<C, S> Selects for Nearby<C, S>
 where
-    Q: Selection,
+    C: Component + Spatial,
+    S: IndexQuerySelection,
 {
-    type Index = SpatialIndex<Q>;
-    type Data = Q;
+    const READS: &'static [component::ComponentType] = S::READS;
+    const WRITES: &'static [component::ComponentType] = S::WRITES;
+    const GLOBAL: &'static [component::ComponentType] = S::GLOBAL;
+}
+
+impl<C: Component + Spatial, S: IndexQuerySelection> IndexQuery for Nearby<C, S>
+where
+    S: IntoIterator,
+{
+    type Index = SpatialIndex<C>;
+    type Selects = S;
     
-    fn on_index<'db>(query: Self, index: &'db Self::Index) -> impl Iterator<Item = EntityId> + 'db {
+    fn find_matches<'db>(query: Self, index: &'db Self::Index) -> impl Iterator<Item = EntityId> + 'db {
         let (query_location, query_radius) = (query.position.as_f64_tuple(), query.max_distance.as_f64());
 
         let grid = index.grid(query_location);
@@ -139,12 +153,6 @@ where
 
 
 
-///// In order to allow [IndexQuery]'s to use the normal [Transformation]
-///// iterator syntax, they must implement [Component]. 
-//impl<'i, C: Component + Spatial> Component for Nearby<C> {}
-
-
-
 /// To allow indexes to be maintained, an [IndexingTransformation] must be
 /// implemented which updates the [DatabaseIndex] with new data in the
 /// [crate::EntityDatabase]
@@ -157,23 +165,23 @@ impl<C: Component + Spatial> IndexingTransformation for SpatialIndexingTransform
     type Data = (EntityId, Read<C>);
     type Index = SpatialIndex<C>;
 
-    fn run(data: IndexingRows<Self::Data>, index: &mut Self::Index) -> TransformationResult {
-        for (entity, spatial) in data {
-            let (_size, position) = (spatial.size_radius(), spatial.position());
-            let (x, y, z) = position.as_f64_tuple();
-            let s = index.grid_size;
-            let grid = index.grid((x, y, z));
-
-            // Check if the entity is in the grid, and if it is then does
-            // the grid cell we calculated already contain it. If it doesn't
-            // contain it, then we have to move it
-            if index.hash_grid
-                .get(&grid)
-                .is_some_and(|item| !item.contains(&SpatialIndexEntry::InGrid(entity)))
-            {
-                todo!()
-            }
-        }
+    fn run<D: EntityDatabase>(_data: IndexingRows<Self::Data, D>, _index: &mut Self::Index) -> TransformationResult {
+        //for (entity, spatial) in data {
+        //    let (_size, position) = (spatial.size_radius(), spatial.position());
+        //    let (x, y, z) = position.as_f64_tuple();
+        //    let s = index.grid_size;
+        //    let grid = index.grid((x, y, z));
+//
+        //    // Check if the entity is in the grid, and if it is then does
+        //    // the grid cell we calculated already contain it. If it doesn't
+        //    // contain it, then we have to move it
+        //    if index.hash_grid
+        //        .get(&grid)
+        //        .is_some_and(|item| !item.contains(&SpatialIndexEntry::InGrid(entity)))
+        //    {
+        //        todo!()
+        //    }
+        //}
         Ok(())
     }
 }
@@ -193,29 +201,29 @@ impl<C: Component + Spatial> IndexingTransformation for SpatialIndexingTransform
 /// S: Scalar Type, any real number type. Used to describe "size" when performing queries,
 ///     if the data doesn't have a defined size then () can be substituted
 pub trait Spatial {
-    type V: SpatialVector + Debug + Default + Clone;
-    type S: FloatType + Debug + Default + Clone;
+    type Vector: SpatialVector + Debug + Default + Clone;
+    type Scalar: FloatType + Debug + Default + Clone;
 
-    fn position(&self) -> Self::V;
-    fn size_radius(&self) -> Self::S;
+    fn position(&self) -> Self::Vector;
+    fn size_radius(&self) -> Self::Scalar;
 }
 
-impl<T, C> Spatial for T
-where
-    T: ReadWrite<Component = C>,
-    C: Spatial,
-{
-    type V = <C as Spatial>::V;
-    type S = <C as Spatial>::S;
-
-    fn position(&self) -> Self::V {
-        todo!()
-    }
-
-    fn size_radius(&self) -> Self::S {
-        todo!()
-    }
-}
+//impl<T, C> Spatial for T
+//where
+//    C: Spatial,
+//    T: ReadWrite<Component = C>,
+//{
+//    type Vector = <C as Spatial>::Vector;
+//    type Scalar = <C as Spatial>::Scalar;
+//
+//    fn position(&self) -> Self::Vector {
+//        todo!()
+//    }
+//
+//    fn size_radius(&self) -> Self::Scalar {
+//        todo!()
+//    }
+//}
 
 /// Float type generic over f32 and f64
 pub trait FloatType {

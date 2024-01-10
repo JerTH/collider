@@ -1,6 +1,6 @@
 //! Indexing Macros
-use crate::EntityId;
 
+/*
 #[macro_use]
 pub mod macros {
     #[macro_export]
@@ -9,12 +9,12 @@ pub mod macros {
 
 
             #[allow(unused_parens)]
-            impl<'db, $($t),+> Iterator for crate::indexing::IndexingRowIter<'db, (EntityId, $($t),+)>
+            impl<'db, $($t),+> Iterator for collider_core::indexing::IndexingRowIter<'db, (EntityId, $($t),+)>
             where
                 $(
                     $t: crate::transform::MetaData,
                     $t: crate::transform::SelectOne<'db>,
-                    <$t as crate::transform::SelectOne<'db>>::Type: crate::components::Component,
+                    <$t as crate::transform::SelectOne<'db>>::Type: collider_core::Component,
                     *mut Vec<$t::Type>: crate::database::reckoning::GetAsRefType<'db, $t, <$t as crate::transform::SelectOne<'db>>::Ref>,
                 )+
             {
@@ -30,12 +30,12 @@ pub mod macros {
 
 
             #[allow(unused_parens)]
-            impl<'db, $($t),+> IntoIterator for crate::indexing::IndexingRows<'db, (EntityId, $($t),+)>
+            impl<'db, $($t),+> IntoIterator for collider_core::indexing::IndexingRows<'db, (EntityId, $($t),+)>
             where
                 $(
                     $t: crate::transform::MetaData,
                     $t: crate::transform::SelectOne<'db>,
-                    <$t as crate::transform::SelectOne<'db>>::Type: crate::components::Component,
+                    <$t as crate::transform::SelectOne<'db>>::Type: collider_core::Component,
                     <$t as crate::transform::SelectOne<'db>>::BorrowType: crate::column::BorrowAsRawParts,
                     crate::column::Column: crate::column::BorrowColumnAs<<$t as crate::transform::SelectOne<'db>>::Type, <$t as crate::transform::SelectOne<'db>>::BorrowType>,
                     crate::column::Column: crate::column::MarkIfWrite<<$t as crate::transform::SelectOne<'db>>::BorrowType>,
@@ -44,8 +44,8 @@ pub mod macros {
                 )+
             {
                 type Item = (EntityId, $($t::Ref,)+);
-                type IntoIter = crate::indexing::IndexingRowIter<'db, (EntityId, $($t),+)>;
-
+                type IntoIter = collider_core::indexing::IndexingRowIter<'db, (EntityId, $($t),+)>;
+                
                 fn into_iter(self) -> Self::IntoIter {
                     (&self).into_iter()
                 }
@@ -56,12 +56,12 @@ pub mod macros {
 
 
             #[allow(unused_parens)]
-            impl<'db, $($t),+> IntoIterator for &crate::indexing::IndexingRows<'db, (EntityId, $($t),+)>
+            impl<'db, $($t),+> IntoIterator for &collider_core::indexing::IndexingRows<'db, (EntityId, $($t),+)>
             where
                 $(
                     $t: crate::transform::MetaData,
                     $t: crate::transform::SelectOne<'db>,
-                    <$t as crate::transform::SelectOne<'db>>::Type: crate::components::Component,
+                    <$t as crate::transform::SelectOne<'db>>::Type: collider_core::Component,
                     <$t as crate::transform::SelectOne<'db>>::BorrowType: crate::column::BorrowAsRawParts,
                     *mut Vec<$t::Type>: crate::database::reckoning::GetAsRefType<'db, $t, <$t as crate::transform::SelectOne<'db>>::Ref>,
                     crate::column::Column: crate::column::BorrowColumnAs<<$t as crate::transform::SelectOne<'db>>::Type, <$t as crate::transform::SelectOne<'db>>::BorrowType>,
@@ -70,7 +70,7 @@ pub mod macros {
                 )+
             {
                 type Item = (EntityId, $($t::Ref,)+);
-                type IntoIter = crate::indexing::IndexingRowIter<'db, (EntityId, $($t),+)>;
+                type IntoIter = collider_core::indexing::IndexingRowIter<'db, (EntityId, $($t),+)>;
 
                 fn into_iter(self) -> Self::IntoIter {
                     todo!()
@@ -89,8 +89,8 @@ pub mod macros {
                     $t: ~const crate::transform::SelectOne<'a>,
                 )+
             {
-                const READS: &'static [Option<crate::components::ComponentType>] = &[$($t::reads(),)+];
-                const WRITES: &'static [Option<crate::components::ComponentType>] = &[$($t::writes(),)+];
+                const READS: &'static [Option<collider_core::tyid::ComponentType>] = &[$($t::reads(),)+];
+                const WRITES: &'static [Option<collider_core::tyid::ComponentType>] = &[$($t::writes(),)+];
             }
         };
     }
@@ -104,3 +104,4 @@ impl_indexing_transformations!(EntityId, [A, 0], [B, 1], [C, 2], [D, 3], [E, 4])
 impl_indexing_transformations!(EntityId, [A, 0], [B, 1], [C, 2], [D, 3], [E, 4], [F, 5]);
 impl_indexing_transformations!(EntityId, [A, 0], [B, 1], [C, 2], [D, 3], [E, 4], [F, 5], [G, 6]);
 impl_indexing_transformations!(EntityId, [A, 0], [B, 1], [C, 2], [D, 3], [E, 4], [F, 5], [G, 6], [H, 7]);
+*/

@@ -4,13 +4,12 @@ use std::{
     sync::RwLock,
 };
 
+use collider_core::{id::{FamilyId, ColumnKey}, component::ComponentType};
 use dashmap::DashMap;
 
 use crate::{
-    column::ColumnKey,
-    components::{ ComponentTypeSet, ComponentType},
-    database::reckoning::DbError,
-    id::FamilyId,
+    components::ComponentTypeSet,
+    error::DbError,
     EntityId,
 };
 
@@ -43,7 +42,7 @@ impl Table {
             free: RwLock::new(Vec::new()),
         }
     }
-
+    
     /// Returns a reference to the family id of this [`Table`].
     pub fn family_id(&self) -> &FamilyId {
         &self.family

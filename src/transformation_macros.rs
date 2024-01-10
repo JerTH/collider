@@ -10,19 +10,15 @@
 pub mod macros {
     #[macro_export]
     macro_rules! impl_transformations {
-        ($($t:ident, $i:tt),*(($qt:ident, $qi:tt),*)) => {
-
-        };
-
         ($([$t:ident, $i:tt]),*) => {
             #[allow(unused_parens)]
             impl<'db, $($t),+> Iterator for crate::transform::RowIter<'db, ($($t),+)>
             where
                 $(
                     $t: crate::transform::MetaData,
-                    $t: crate::transform::SelectOne<'db>,
-                    <$t as crate::transform::SelectOne<'db>>::Type: crate::components::Component,
-                    *mut Vec<$t::Type>: crate::database::reckoning::GetAsRefType<'db, $t, <$t as crate::transform::SelectOne<'db>>::Ref>,
+                    $t: collider_core::select::SelectOne<'db>,
+                    <$t as collider_core::select::SelectOne<'db>>::Type: collider_core::Component,
+                    *mut Vec<$t::Type>: crate::database::reckoning::GetAsRefType<'db, $t, <$t as collider_core::select::SelectOne<'db>>::Ref>,
                 )+
             {
                 type Item = ($($t::Ref,)+);
@@ -40,7 +36,7 @@ pub mod macros {
                                 let (_, pointer): &(crate::borrowed::RawBorrow, std::ptr::NonNull<std::os::raw::c_void>) = self.borrows.get_unchecked(self.table_index + $i);
                                 let casted: std::ptr::NonNull<Vec<$t::Type>> = pointer.cast::<Vec<$t::Type>>();
                                 let raw: *mut Vec<$t::Type> = casted.as_ptr();
-                                if let Some(result) = <*mut Vec<$t::Type> as GetAsRefType<'db, $t, <$t as crate::transform::SelectOne<'db>>::Ref>>::get_as_ref_type(&raw, self.column_index) {
+                                if let Some(result) = <*mut Vec<$t::Type> as GetAsRefType<'db, $t, <$t as collider_core::select::SelectOne<'db>>::Ref>>::get_as_ref_type(&raw, self.column_index) {
                                     result
                                 } else {
                                     self.table_index += 1;
@@ -54,17 +50,18 @@ pub mod macros {
                     Some(row)
                 }
             }
+
             #[allow(unused_parens)]
             impl<'db, $($t),+> IntoIterator for crate::transform::Rows<'db, ($($t),+)>
             where
                 $(
                     $t: crate::transform::MetaData,
-                    $t: crate::transform::SelectOne<'db>,
-                    <$t as crate::transform::SelectOne<'db>>::Type: crate::components::Component,
-                    <$t as crate::transform::SelectOne<'db>>::BorrowType: crate::column::BorrowAsRawParts,
-                    crate::column::Column: crate::column::BorrowColumnAs<<$t as crate::transform::SelectOne<'db>>::Type, <$t as crate::transform::SelectOne<'db>>::BorrowType>,
-                    crate::column::Column: crate::column::MarkIfWrite<<$t as crate::transform::SelectOne<'db>>::BorrowType>,
-                    *mut Vec<$t::Type>: crate::database::reckoning::GetAsRefType<'db, $t, <$t as crate::transform::SelectOne<'db>>::Ref>,
+                    $t: collider_core::select::SelectOne<'db>,
+                    <$t as collider_core::select::SelectOne<'db>>::Type: collider_core::Component,
+                    <$t as collider_core::select::SelectOne<'db>>::BorrowType: crate::column::BorrowAsRawParts,
+                    crate::column::Column: crate::column::BorrowColumnAs<<$t as collider_core::select::SelectOne<'db>>::Type, <$t as collider_core::select::SelectOne<'db>>::BorrowType>,
+                    crate::column::Column: crate::column::MarkIfWrite<<$t as collider_core::select::SelectOne<'db>>::BorrowType>,
+                    *mut Vec<$t::Type>: crate::database::reckoning::GetAsRefType<'db, $t, <$t as collider_core::select::SelectOne<'db>>::Ref>,
                     $t: 'static,
                 )+
             {
@@ -74,17 +71,18 @@ pub mod macros {
                     (&self).into_iter()
                 }
             }
+            
             #[allow(unused_parens)]
             impl<'db, $($t),+> IntoIterator for &crate::transform::Rows<'db, ($($t),+)>
             where
                 $(
                     $t: crate::transform::MetaData,
-                    $t: crate::transform::SelectOne<'db>,
-                    <$t as crate::transform::SelectOne<'db>>::Type: crate::components::Component,
-                    <$t as crate::transform::SelectOne<'db>>::BorrowType: crate::column::BorrowAsRawParts,
-                    *mut Vec<$t::Type>: crate::database::reckoning::GetAsRefType<'db, $t, <$t as crate::transform::SelectOne<'db>>::Ref>,
-                    crate::column::Column: crate::column::BorrowColumnAs<<$t as crate::transform::SelectOne<'db>>::Type, <$t as crate::transform::SelectOne<'db>>::BorrowType>,
-                    crate::column::Column: crate::column::MarkIfWrite<<$t as crate::transform::SelectOne<'db>>::BorrowType>,
+                    $t: collider_core::select::SelectOne<'db>,
+                    <$t as collider_core::select::SelectOne<'db>>::Type: collider_core::Component,
+                    <$t as collider_core::select::SelectOne<'db>>::BorrowType: crate::column::BorrowAsRawParts,
+                    *mut Vec<$t::Type>: crate::database::reckoning::GetAsRefType<'db, $t, <$t as collider_core::select::SelectOne<'db>>::Ref>,
+                    crate::column::Column: crate::column::BorrowColumnAs<<$t as collider_core::select::SelectOne<'db>>::Type, <$t as collider_core::select::SelectOne<'db>>::BorrowType>,
+                    crate::column::Column: crate::column::MarkIfWrite<<$t as collider_core::select::SelectOne<'db>>::BorrowType>,
                     $t: 'static,
                 )+
             {
@@ -99,8 +97,8 @@ pub mod macros {
                                 use crate::column::BorrowColumnAs;
                                 let col_idx = (i * self.width) + $i;
                                 let column = db.get_column(self.keys.get_unchecked(col_idx)).expect("expected initialized column for iteration");
-                                <crate::column::Column as crate::column::MarkIfWrite<<$t as crate::transform::SelectOne<'db>>::BorrowType>>::mark_if_write(&column);
-                                <$t as crate::transform::SelectOne<'db>>::BorrowType::from(column.borrow_column_as())
+                                <crate::column::Column as crate::column::MarkIfWrite<<$t as collider_core::select::SelectOne<'db>>::BorrowType>>::mark_if_write(&column);
+                                <$t as collider_core::select::SelectOne<'db>>::BorrowType::from(column.borrow_column_as())
                             }
                         ,)+);
                         $(
@@ -115,16 +113,20 @@ pub mod macros {
                     iter
                 }
             }
+
             #[allow(unused_parens)]
             impl<'a, $($t),+> const crate::transform::Selection for ($($t),+)
             where
                 $(
                     $t: crate::transform::MetaData,
-                    $t: ~const crate::transform::SelectOne<'a>,
+                    $t: ~const collider_core::select::SelectOne<'a>,
                 )+
             {
-                const READS: &'static [Option<crate::components::ComponentType>] = &[$($t::reads(),)+];
-                const WRITES: &'static [Option<crate::components::ComponentType>] = &[$($t::writes(),)+];
+                //const READS: &'static [Option<collider_core::tyid::ComponentType>] = &[$($t::reads(),)+];
+                //const WRITES: &'static [Option<collider_core::tyid::ComponentType>] = &[$($t::writes(),)+];
+                
+                const READS: &'static [Option<collider_core::component::ComponentType>] = &[];
+                const WRITES: &'static [Option<collider_core::component::ComponentType>] = &[];
             }
         };
     }
@@ -138,4 +140,3 @@ impl_transformations!([A, 0], [B, 1], [C, 2], [D, 3], [E, 4]);
 impl_transformations!([A, 0], [B, 1], [C, 2], [D, 3], [E, 4], [F, 5]);
 impl_transformations!([A, 0], [B, 1], [C, 2], [D, 3], [E, 4], [F, 5], [G, 6]);
 impl_transformations!([A, 0], [B, 1], [C, 2], [D, 3], [E, 4], [F, 5], [G, 6], [H, 7]);
-

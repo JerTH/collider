@@ -1,31 +1,6 @@
-use std::{sync::{RwLockWriteGuard, RwLock}, collections::HashMap};
-
-use crate::{components::{ComponentTypeSet, ComponentType}, id::{FamilyId, FamilyIdSet}, EntityId, transfer::TransferGraph};
-
-
-
-pub trait DbMapping<'db> {
-    type Guard;
-    type From;
-    type Map;
-    type To;
-}
-
-impl<'db, F, T> DbMapping<'db> for (F, T)
-where
-    F: 'db,
-    T: 'db + Clone,
-{
-    type Guard = RwLockWriteGuard<'db, Self::Map>;
-    type From = F;
-    type Map = HashMap<F, T>;
-    type To = T;
-}
-
-pub trait GetDbMap<'db, M: DbMapping<'db>> {
-    fn get(&self, from: &M::From) -> Option<M::To>;
-    fn mut_map(&'db self) -> Option<M::Guard>;
-}
+use std::{sync::RwLock, collections::HashMap};
+use collider_core::{id::{FamilyId, FamilyIdSet}, component::ComponentType, mapping::{GetDbMap, DbMapping}};
+use crate::{components::ComponentTypeSet, EntityId, transfer::TransferGraph};
 
 impl<'db> GetDbMap<'db, (ComponentTypeSet, FamilyId)> for DbMaps {
     fn get(
@@ -169,13 +144,13 @@ impl<'db> DbMaps {
     pub fn get_map<M>(&self, from: &M::From) -> Option<M::To>
     where
         M: DbMapping<'db>,
-        Self: GetDbMap<'db, M>,
         M::To: 'db,
+        Self: GetDbMap<'db, M>,
     {
         <Self as GetDbMap<'db, M>>::get(&self, from)
     }
 
-    pub fn mut_map<M: DbMapping<'db>>(&'db self) -> Option<M::Guard>
+    pub fn mut_map<M>(&'db self) -> Option<M::Guard>
     where
         M: DbMapping<'db>,
         M::Map: 'db,

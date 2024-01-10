@@ -1,8 +1,9 @@
-use crate::id::FamilyId;
-use crate::components::ComponentType;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
+
+use collider_core::id::FamilyId;
+use collider_core::component::ComponentType;
 
 #[derive(Debug, Clone)]
 pub struct TransferGraph {

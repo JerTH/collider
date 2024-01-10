@@ -1,0 +1,12 @@
+[package]
+name = "collider-core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "collider_core"
+path = "src/lib.rs"
+
+[dependencies]
+const-fnv1a-hash = "1.1.0"
+constcat = "0.4.0"

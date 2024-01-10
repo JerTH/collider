@@ -1,52 +1,6 @@
 use std::{collections::BTreeSet, sync::Arc, fmt::{Debug, Display}};
+use collider_core::component::ComponentType;
 use itertools::Itertools;
-
-use crate::id::StableTypeId;
-
-/// [Component]
-/// 
-/// The core component trait
-/// 
-/// Users must implement this trait on any struct or enum they wish to
-/// use as components in an [crate::EntityDatabase]
-pub trait Component: Default + Debug + Clone + 'static {
-    fn is_query_component() -> bool { false }
-}
-
-/// Component implementation for the unit type
-/// Every entity automatically gets this component when it's created
-impl Component for () {}
-
-/// [ComponentType]
-/// 
-/// A unique identifier for a component
-#[derive(Copy, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ComponentType(StableTypeId);
-
-impl ComponentType {
-    pub const fn of<C: Component>() -> Self {
-        Self(StableTypeId::of::<C>())
-    }
-
-    pub fn inner(&self) -> StableTypeId {
-        return self.0;
-    }
-}
-
-impl From<StableTypeId> for ComponentType {
-    fn from(value: StableTypeId) -> Self {
-        Self(value)
-    }
-}
-
-impl Display for ComponentType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let full_name = self.0.name().unwrap_or("{unknown}");
-        let split_str = full_name.rsplit_once("::");
-        let substring = split_str.unwrap_or((full_name, full_name)).1;
-        write!(f, "{}", substring)
-    }
-}
 
 /// [ComponentTypeSet]
 /// 
@@ -105,7 +59,7 @@ where
 {
     fn from(iter: I) -> Self {
         let mut id: u64 = 0;
-
+        
         // sum the unique 64 bit id's for each component type
         // and collect them into a set, use the summed id
         // (which should have a similar likelyhood of collision
@@ -113,9 +67,9 @@ where
         // the set of components
         let set: BTreeSet<ComponentType> = iter
             .into_iter()
-            .map(|c| {
-                id = id.wrapping_add(c.0 .0);
-                c
+            .map(|component_ty| {
+                id = id.wrapping_add(component_ty.inner().raw());
+                component_ty
             })
             .collect();
         ComponentTypeSet {

@@ -1,0 +1,18 @@
+[package]
+name = "collider-proc"
+version = "0.1.2"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "collider_proc"
+path = "src/lib.rs"
+proc-macro = true
+
+[dependencies]
+collider-core = { path = "../collider-core" }
+syn = { version = "*", features = ["extra-traits"] }
+quote = "*"
+proc-macro2 = "*"
+r3bl_rs_utils = "*"

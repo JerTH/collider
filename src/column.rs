@@ -4,11 +4,12 @@ use std::{
     ptr::NonNull, any::Any, sync::atomic::AtomicBool, marker::PhantomData,
 };
 
+use collider_core::{*, any::AnyPtr};
+
 use crate::{
     borrowed::{BorrowError, BorrowRef, BorrowRefMut, BorrowSentinel, RawBorrow},
-    database::reckoning::{AnyPtr, DbError},
-    id::{StableTypeId, CommutativeId, FamilyId},
-    EntityId, components::{Component, ComponentType},
+    error::DbError,
+    EntityId,
 };
 
 pub struct RawColumnRef<C: Component> {
@@ -152,29 +153,6 @@ impl<C: Component> RawColumnRefMut<C> {
 
 pub const COLUMN_LENGTH_MAXIMUM: usize = 2048; // 16384
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ColumnKey(CommutativeId);
-
-impl ColumnKey {
-    fn raw(&self) -> u64 {
-        self.0.raw()
-    }
-}
-
-/// Combines a family ID and a type id into a column key
-/// Each family can have exactly one column of a given type
-impl From<(FamilyId, ComponentType)> for ColumnKey {
-    fn from(value: (FamilyId, ComponentType)) -> Self {
-        ColumnKey(CommutativeId::from((value.0, value.1)))
-    }
-}
-
-impl Display for ColumnKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "COL_{:#X}", self.raw())
-    }
-}
-
 /// A header describing a specific typed column. Holds the necessary functions
 /// to construct a column of its own type and interact with it, and other
 /// meta data associated with the column
@@ -303,7 +281,7 @@ impl<'b> Column {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ColumnMoveResult {
     Moved {
         moved: EntityId,
@@ -318,7 +296,7 @@ pub(crate) enum ColumnMoveResult {
     NoMove,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ColumnSwapRemoveResult {
     pub(crate) moved: EntityId,
     pub(crate) removed: EntityId,

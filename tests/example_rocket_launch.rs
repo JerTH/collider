@@ -94,11 +94,11 @@ pub struct Physics {
 impl Component for Physics {}
 
 impl Spatial for Physics {
-    type V = (f64, f64, f64);
-    type S = f64;
+    type Vector = (f64, f64, f64);
+    type Scalar = f64;
 
-    fn position(&self) -> Self::V { (0.0, 0.0, self.altitude) }
-    fn size_radius(&self) -> Self::S { 0.0 }
+    fn position(&self) -> Self::Vector { (0.0, 0.0, self.altitude) }
+    fn size_radius(&self) -> Self::Scalar { 0.0 }
 }
 
 #[derive(Default, Debug, Clone)]
