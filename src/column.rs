@@ -380,7 +380,8 @@ impl<'b, C: Component> ColumnInner<C> {
     fn is_same_column(from_ptr: &AnyPtr, dest_ptr: &AnyPtr) -> bool {
         let raw_ptr_from: *const dyn Any = from_ptr.as_ref();
         let raw_ptr_dest: *const dyn Any = dest_ptr.as_ref();
-        raw_ptr_from == raw_ptr_dest
+        
+        std::ptr::addr_eq(raw_ptr_from, raw_ptr_dest)
     }
 
     fn downcast_and_borrow(column: &AnyPtr) -> Result<RawColumnRef<C>, DbError> {

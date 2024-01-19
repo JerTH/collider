@@ -8,15 +8,12 @@ use std::sync::atomic::AtomicU16;
 use proc_macro2::{TokenStream, Ident, Span};
 
 use quote::quote;
-use syn::{parse_macro_input, DeriveInput, Field, spanned::Spanned, Path};
+use syn::{parse_macro_input, DeriveInput, Field, spanned::Spanned};
 use crate::selection::SelectionInput;
-use collider_core::component::ComponentType;
 
 mod selection;
 
-// 13107 macro invocations until wrap around should be enough,
-// leaves lots of namespace open
-static INVOCATION_INIT: u16 = 0xCCCC;
+static INVOCATION_INIT: u16 = 0xAAAA;
 static INVOCATION: AtomicU16 = AtomicU16::new(INVOCATION_INIT);
 
 fn invocation_count() -> u16 {
@@ -136,14 +133,13 @@ pub fn selection(_meta: proc_macro::TokenStream, input: proc_macro::TokenStream)
         impl<'db> #_name<'db> {
             #(
                 pub fn #_secondary_field_getter_names(&'db self)
-                //    -> <#_secondary_field_getter_types as collider_core::select::SelectOne<'db>>::Ref
-                    -> <#_secondary_field_getter_types as collider_core::select::SelectOne<'db>>::Ref 
+                    -> <#_secondary_field_getter_types as collider_core::select::DerefSelectionField<'db>>::Ref 
                 {
                     todo!()
                 }
             )*
         }
-        
+
         impl<'db> collider_core::select::Selects for #_name<'db> {
             const READS: &'static [collider_core::component::ComponentType] = &[
                 #(ComponentType::of::<#_primary_reads>(),)*
@@ -169,13 +165,46 @@ pub fn selection(_meta: proc_macro::TokenStream, input: proc_macro::TokenStream)
             }
         }
         
-        impl<'db> collider_core::select::DatabaseSelection for #_name<'db> {}
+        impl<'db> collider_core::select::DatabaseSelection for #_name<'db> {
+            fn run_transformation(db: &impl collider_core::database::EntityDatabase) -> TransformationResult {
+                use collider_core::component::ComponentTypeSet;
+                use collider_core::select::Selects;
+                use collider_core::id::FamilyId;
+                use collider_core::id::FamilyIdSet;
+
+                let reads = <Self as Selects>::reads();
+                let writes = <Self as Selects>::writes();
+                
+                let row_components: Vec<ComponentType> = reads.iter().chain(writes.iter()).cloned().collect();
+                let component_set: ComponentTypeSet = ComponentTypeSet::from(row_components);
+
+                let matching_families: Vec<FamilyId> = db
+                    .query_mapping::<ComponentTypeSet, FamilyIdSet>(&component_set)
+                    .expect("expected matching families")
+                    .clone_into_vec();
+
+                let column_keys = matching_families
+                    .iter()
+                    .map(|family| {
+                        db.get_table::<  todo!()  >(family).expect("expected table for family")
+                    })
+                    .map(|table| {
+                        row_components.iter().map(|component| {
+                            table.column_map().get(component).expect("expected column key")
+                        })
+                    })
+                    .flatten();
+                
+                Ok(())
+            }
+        }
         
         pub struct #_iter_item_name<'db> {
-            #(#_iter_primary_field_names: <#_iter_primary_field_access<#_iter_primary_field_types> as collider_core::select::SelectOne<'db>>::Ref,)*
-            #(#_iter_secondary_field_names: <#_iter_secondary_field_types as collider_core::select::SelectOne<'db>>::Ref,)*
+            __generated_marker: std::marker::PhantomData<&'db ()>,
+            #(#_iter_primary_field_names: <#_iter_primary_field_access<#_iter_primary_field_types> as collider_core::select::DerefSelectionField<'db>>::Ref,)*
+            #(#_iter_secondary_field_names: <#_iter_secondary_field_types as collider_core::select::DerefSelectionField<'db>>::Ref,)*
         }
-
+        
         impl<'db> IntoIterator for &#_name<'db> {
             type IntoIter = #_iter_name<'db>;
             type Item = #_iter_item_name<'db>;
@@ -210,7 +239,6 @@ pub fn selection(_meta: proc_macro::TokenStream, input: proc_macro::TokenStream)
             }
         }
     };
-    //let out = TokenStream::new();
 
     proc_macro::TokenStream::from(out)
 }

@@ -19,6 +19,7 @@ pub mod reckoning {
     use collider_core::indexing::DatabaseIndexType;
     use collider_core::mapping::GetDbMap;
     use collider_core::component::ComponentType;
+    use collider_core::component::ComponentTypeSet;
 
     // crate
     use crate::column::Column;
@@ -27,7 +28,6 @@ pub mod reckoning {
     use crate::column::ColumnMoveResult;
     use crate::column::ColumnSwapRemoveResult;
     use crate::components::ComponentDelta;
-    use crate::components::ComponentTypeSet;
     use crate::entity::EntityAllocError;
     use crate::entity::EntityAllocator;
     use crate::error::DbError;
@@ -902,12 +902,12 @@ pub mod reckoning {
         
     } // transfer ======================================================================
 
-    pub trait GetAsRefType<'db, S: collider_core::select::SelectOne<'db>, R> {
+    pub trait GetAsRefType<'db, S: collider_core::select::DerefSelectionField<'db>, R> {
         unsafe fn get_as_ref_type(&self, index: usize) -> Option<R>;
     }
     
     // Type system gymnastics
-    impl<'db, S: collider_core::select::SelectOne<'db>> GetAsRefType<'db, S, &'db S::Type> for *mut Vec<<S as collider_core::select::SelectOne<'db>>::Type>
+    impl<'db, S: collider_core::select::DerefSelectionField<'db>> GetAsRefType<'db, S, &'db S::Type> for *mut Vec<<S as collider_core::select::DerefSelectionField<'db>>::Type>
     {
         #[inline(always)]
         unsafe fn get_as_ref_type(&self, index: usize) -> Option<&'db S::Type> {
@@ -915,7 +915,7 @@ pub mod reckoning {
         }
     }
 
-    impl<'db, S: collider_core::select::SelectOne<'db>> GetAsRefType<'db, S, &'db mut S::Type> for *mut Vec<<S as collider_core::select::SelectOne<'db>>::Type>
+    impl<'db, S: collider_core::select::DerefSelectionField<'db>> GetAsRefType<'db, S, &'db mut S::Type> for *mut Vec<<S as collider_core::select::DerefSelectionField<'db>>::Type>
     {
         #[inline(always)]
         unsafe fn get_as_ref_type(&self, index: usize) -> Option<&'db mut S::Type> {

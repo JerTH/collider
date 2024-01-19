@@ -382,10 +382,10 @@ fn test_commutative_id() {
     let iter_aa = [StableTypeId::of::<f64>(), StableTypeId::of::<f32>()];
     let iter_b = [StableTypeId::of::<i8>(), StableTypeId::of::<i16>()];
     let iter_c = [StableTypeId::of::<i8>(), StableTypeId::of::<i16>(), StableTypeId::of::<i32>()];
-    let id_a = CommutativeId::from_iter(iter_a.into_iter().map(|i| i.raw_id()));
-    let id_aa = CommutativeId::from_iter(iter_aa.into_iter().map(|i| i.raw_id()));
-    let id_b = CommutativeId::from_iter(iter_b.into_iter().map(|i| i.raw_id()));
-    let id_c = CommutativeId::from_iter(iter_c.into_iter().map(|i| i.raw_id()));
+    let id_a = CommutativeId::from_iter(iter_a.into_iter().map(|i| i.raw()));
+    let id_aa = CommutativeId::from_iter(iter_aa.into_iter().map(|i| i.raw()));
+    let id_b = CommutativeId::from_iter(iter_b.into_iter().map(|i| i.raw()));
+    let id_c = CommutativeId::from_iter(iter_c.into_iter().map(|i| i.raw()));
     
     assert_ne!(id_a, id_b);
     assert_ne!(id_a, id_c);

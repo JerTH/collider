@@ -5,7 +5,7 @@
 //! Indexes (Indices) are used to speed up access into the [EntityDatabase] for more
 //! specialized queries
 use std::{fmt::Debug, marker::PhantomData};
-use crate::{EntityDatabase, Component, EntityId, any::AnyPtr, id::ColumnKey, results::TransformationResult, component::ComponentType, DatabaseSelection, select::Selects };
+use crate::{EntityDatabase, Component, EntityId, any::AnyPtr, id::ColumnKey, results::TransformationResult, select::Selects };
 
 /// A [DatabaseIndex] describes an index of data stored adjacent to an [EntityDatabase] which
 /// organizes its own list of [EntityId]'s it's interested in based on some [Component] data.

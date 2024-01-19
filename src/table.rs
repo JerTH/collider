@@ -4,11 +4,10 @@ use std::{
     sync::RwLock,
 };
 
-use collider_core::{id::{FamilyId, ColumnKey}, component::ComponentType};
+use collider_core::{id::{FamilyId, ColumnKey}, component::{ComponentType, ComponentTypeSet}};
 use dashmap::DashMap;
 
 use crate::{
-    components::ComponentTypeSet,
     error::DbError,
     EntityId,
 };

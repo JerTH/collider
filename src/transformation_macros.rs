@@ -16,16 +16,22 @@ pub mod macros {
             where
                 $(
                     $t: crate::transform::MetaData,
-                    $t: collider_core::select::SelectOne<'db>,
-                    <$t as collider_core::select::SelectOne<'db>>::Type: collider_core::Component,
-                    *mut Vec<$t::Type>: crate::database::reckoning::GetAsRefType<'db, $t, <$t as collider_core::select::SelectOne<'db>>::Ref>,
+                    $t: collider_core::select::DerefSelectionField<'db>,
+                    <$t as collider_core::select::DerefSelectionField<'db>>::Type: collider_core::Component,
+                    *mut Vec<$t::Type>: crate::database::reckoning::GetAsRefType<'db, $t, <$t as collider_core::select::DerefSelectionField<'db>>::Ref>,
                 )+
             {
                 type Item = ($($t::Ref,)+);
                 fn next(&mut self) -> Option<Self::Item> {
+                    if self.width == 0 {
+                        tracing::debug!("Row width was zero");
+                        return None;
+                    }
+
                     if self.table_index >= (self.keys.len() / self.width) {
                         return None;
                     }
+                    
                     use crate::database::reckoning::GetAsRefType;
                     let row: Self::Item = (
                         $(
@@ -36,7 +42,7 @@ pub mod macros {
                                 let (_, pointer): &(crate::borrowed::RawBorrow, std::ptr::NonNull<std::os::raw::c_void>) = self.borrows.get_unchecked(self.table_index + $i);
                                 let casted: std::ptr::NonNull<Vec<$t::Type>> = pointer.cast::<Vec<$t::Type>>();
                                 let raw: *mut Vec<$t::Type> = casted.as_ptr();
-                                if let Some(result) = <*mut Vec<$t::Type> as GetAsRefType<'db, $t, <$t as collider_core::select::SelectOne<'db>>::Ref>>::get_as_ref_type(&raw, self.column_index) {
+                                if let Some(result) = <*mut Vec<$t::Type> as GetAsRefType<'db, $t, <$t as collider_core::select::DerefSelectionField<'db>>::Ref>>::get_as_ref_type(&raw, self.column_index) {
                                     result
                                 } else {
                                     self.table_index += 1;
@@ -56,12 +62,12 @@ pub mod macros {
             where
                 $(
                     $t: crate::transform::MetaData,
-                    $t: collider_core::select::SelectOne<'db>,
-                    <$t as collider_core::select::SelectOne<'db>>::Type: collider_core::Component,
-                    <$t as collider_core::select::SelectOne<'db>>::BorrowType: crate::column::BorrowAsRawParts,
-                    crate::column::Column: crate::column::BorrowColumnAs<<$t as collider_core::select::SelectOne<'db>>::Type, <$t as collider_core::select::SelectOne<'db>>::BorrowType>,
-                    crate::column::Column: crate::column::MarkIfWrite<<$t as collider_core::select::SelectOne<'db>>::BorrowType>,
-                    *mut Vec<$t::Type>: crate::database::reckoning::GetAsRefType<'db, $t, <$t as collider_core::select::SelectOne<'db>>::Ref>,
+                    $t: collider_core::select::DerefSelectionField<'db>,
+                    <$t as collider_core::select::DerefSelectionField<'db>>::Type: collider_core::Component,
+                    <$t as collider_core::select::DerefSelectionField<'db>>::BorrowType: crate::column::BorrowAsRawParts,
+                    crate::column::Column: crate::column::BorrowColumnAs<<$t as collider_core::select::DerefSelectionField<'db>>::Type, <$t as collider_core::select::DerefSelectionField<'db>>::BorrowType>,
+                    crate::column::Column: crate::column::MarkIfWrite<<$t as collider_core::select::DerefSelectionField<'db>>::BorrowType>,
+                    *mut Vec<$t::Type>: crate::database::reckoning::GetAsRefType<'db, $t, <$t as collider_core::select::DerefSelectionField<'db>>::Ref>,
                     $t: 'static,
                 )+
             {
@@ -77,12 +83,12 @@ pub mod macros {
             where
                 $(
                     $t: crate::transform::MetaData,
-                    $t: collider_core::select::SelectOne<'db>,
-                    <$t as collider_core::select::SelectOne<'db>>::Type: collider_core::Component,
-                    <$t as collider_core::select::SelectOne<'db>>::BorrowType: crate::column::BorrowAsRawParts,
-                    *mut Vec<$t::Type>: crate::database::reckoning::GetAsRefType<'db, $t, <$t as collider_core::select::SelectOne<'db>>::Ref>,
-                    crate::column::Column: crate::column::BorrowColumnAs<<$t as collider_core::select::SelectOne<'db>>::Type, <$t as collider_core::select::SelectOne<'db>>::BorrowType>,
-                    crate::column::Column: crate::column::MarkIfWrite<<$t as collider_core::select::SelectOne<'db>>::BorrowType>,
+                    $t: collider_core::select::DerefSelectionField<'db>,
+                    <$t as collider_core::select::DerefSelectionField<'db>>::Type: collider_core::Component,
+                    <$t as collider_core::select::DerefSelectionField<'db>>::BorrowType: crate::column::BorrowAsRawParts,
+                    *mut Vec<$t::Type>: crate::database::reckoning::GetAsRefType<'db, $t, <$t as collider_core::select::DerefSelectionField<'db>>::Ref>,
+                    crate::column::Column: crate::column::BorrowColumnAs<<$t as collider_core::select::DerefSelectionField<'db>>::Type, <$t as collider_core::select::DerefSelectionField<'db>>::BorrowType>,
+                    crate::column::Column: crate::column::MarkIfWrite<<$t as collider_core::select::DerefSelectionField<'db>>::BorrowType>,
                     $t: 'static,
                 )+
             {
@@ -91,14 +97,19 @@ pub mod macros {
                 fn into_iter(self) -> Self::IntoIter {
                     let db = self.database();
                     let mut iter = crate::transform::RowIter::<'db, ($($t),+)>::new(db);
+
+                    if self.width == 0 {
+                        return iter;
+                    }
+
                     for i in 0..(self.keys.len() / self.width) {
                         let borrows: ($($t::BorrowType,)+) = ($(
                             unsafe {
                                 use crate::column::BorrowColumnAs;
                                 let col_idx = (i * self.width) + $i;
                                 let column = db.get_column(self.keys.get_unchecked(col_idx)).expect("expected initialized column for iteration");
-                                <crate::column::Column as crate::column::MarkIfWrite<<$t as collider_core::select::SelectOne<'db>>::BorrowType>>::mark_if_write(&column);
-                                <$t as collider_core::select::SelectOne<'db>>::BorrowType::from(column.borrow_column_as())
+                                <crate::column::Column as crate::column::MarkIfWrite<<$t as collider_core::select::DerefSelectionField<'db>>::BorrowType>>::mark_if_write(&column);
+                                <$t as collider_core::select::DerefSelectionField<'db>>::BorrowType::from(column.borrow_column_as())
                             }
                         ,)+);
                         $(
@@ -119,7 +130,7 @@ pub mod macros {
             where
                 $(
                     $t: crate::transform::MetaData,
-                    $t: ~const collider_core::select::SelectOne<'a>,
+                    $t: ~const collider_core::select::DerefSelectionField<'a>,
                 )+
             {
                 //const READS: &'static [Option<collider_core::tyid::ComponentType>] = &[$($t::reads(),)+];

@@ -1,8 +1,8 @@
 use std::{error::Error, fmt::Display};
 
-use collider_core::id::FamilyId;
+use collider_core::{id::FamilyId, component::ComponentTypeSet};
 
-use crate::{EntityId, components::ComponentTypeSet};
+use crate::EntityId;
 
 #[derive(Debug)]
 pub enum DbError {

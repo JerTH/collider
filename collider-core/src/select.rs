@@ -4,7 +4,7 @@
 //! 
 //! 
 
-use crate::{indexing::IndexQuery, component::ComponentType};
+use crate::{indexing::IndexQuery, component::ComponentType, results::TransformationResult, EntityDatabase};
 
 pub trait Selection {
     
@@ -23,10 +23,15 @@ pub trait Selects {
     fn writes() -> Vec<ComponentType> {
         Self::WRITES.to_vec()
     }
+
+    //fn select_and_run<F>(tr: F) -> TransformationResult
+    //where
+    //    Self: Sized,
+    //    F: Fn(Self) -> TransformationResult,;
 }
 
 #[const_trait]
-pub trait SelectOne<'db> {
+pub trait DerefSelectionField<'db> {
     type Ref;
     type Type;
     type BorrowType;
@@ -39,7 +44,7 @@ pub trait SelectOne<'db> {
 }
 
 /// Blanket implementation for IndexQuery types
-impl<'db, T> const SelectOne<'db> for T
+impl<'db, T> const DerefSelectionField<'db> for T
 where
     T: IndexQuery + 'db,
     T: Selects,
@@ -52,6 +57,8 @@ where
     //const WRITES: &'static [ComponentType] = &[];
 }
 
-pub trait DatabaseSelection: IntoIterator + Selects {}
+pub trait DatabaseSelection: IntoIterator + Selects {
+    fn run_transformation(db: &impl EntityDatabase) -> TransformationResult;
+}
 
 pub trait SelectionField {}

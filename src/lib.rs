@@ -1,7 +1,7 @@
 //! 
 //! Collider is a relational entity database and jobs system which supports fast cacheable queries and quick parallel iteration
 //! 
-
+#![feature(lazy_cell)]
 #![feature(const_trait_impl)]
 //#![feature(associated_type_defaults)]
 
@@ -24,8 +24,9 @@ pub mod mapping;
 pub mod indexes;
 
 // Prelude
-pub use collider_core::EntityId;
-pub use collider_core::Component;
+pub use collider_core::{ EntityId, Component };
+pub use collider_core::component::{ ComponentType };
+pub use collider_proc::{ component, selection };
 pub use database::EntityDatabase;
 pub use transform::{ Phase, Transformation, Read, Write };
 

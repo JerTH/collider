@@ -10,3 +10,4 @@ path = "src/lib.rs"
 [dependencies]
 const-fnv1a-hash = "1.1.0"
 constcat = "0.4.0"
+itertools = "0.12.0"

@@ -1,6 +1,6 @@
 use std::{sync::RwLock, collections::HashMap};
-use collider_core::{id::{FamilyId, FamilyIdSet}, component::ComponentType, mapping::{GetDbMap, DbMapping}};
-use crate::{components::ComponentTypeSet, EntityId, transfer::TransferGraph};
+use collider_core::{id::{FamilyId, FamilyIdSet}, component::{ComponentType, ComponentTypeSet}, mapping::{GetDbMap, DbMapping}};
+use crate::{EntityId, transfer::TransferGraph};
 
 impl<'db> GetDbMap<'db, (ComponentTypeSet, FamilyId)> for DbMaps {
     fn get(

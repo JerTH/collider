@@ -4,19 +4,18 @@
 //! [crate::database::reckoning::EntityDatabase]
 
 use collider_core::*;
+use collider_core::component::ComponentTypeSet;
 use collider_core::id::ColumnKey;
 use collider_core::id::FamilyId;
 use collider_core::id::FamilyIdSet;
-use collider_core::indexing::IndexQuery;
 use collider_core::results::PhaseResult;
 use collider_core::results::TransformationResult;
-use collider_core::select::SelectOne;
 use collider_core::component::ComponentType;
+use collider_core::select::DerefSelectionField;
 use collider_core::select::Selects;
 use crate::borrowed::RawBorrow;
 use crate::column::RawColumnRef;
 use crate::column::RawColumnRefMut;
-use crate::components::ComponentTypeSet;
 use crate::conflict::ConflictGraph;
 use crate::conflict::Dependent;
 use std::collections::HashMap;
@@ -28,8 +27,18 @@ use std::fmt::Debug;
 
 use crate::database::EntityDatabase;
 
+struct SubPhase<'db> {
+    transformations: HashMap<TransformationId, DynTransform<'db>>,
+}
+
+impl<'db> SubPhase<'db> {
+    fn len(&self) -> usize {
+        self.transformations.len()
+    }
+}
+
 pub struct Phase<'db> {
-    subphases: Vec<HashMap<TransformationId, DynTransform<'db>>>,
+    subphases: Vec<SubPhase<'db>>,
 }
 
 impl<'db> Phase<'db> {
@@ -39,6 +48,17 @@ impl<'db> Phase<'db> {
         }
     }
 
+    pub fn add_transformation_new<F, S>(&mut self, tr: F)
+    where
+        F: Fn(S) -> TransformationResult,
+        S: Selects,
+    {
+        tracing::debug!(transformation = std::any::type_name::<F>(), "adding phase transformation");
+        <(F, S)>::foobar();
+        todo!()
+    }
+    
+    #[deprecated]
     pub fn add_transformation<T>(&mut self, tr: T)
     where
         T: Transformation,
@@ -57,6 +77,7 @@ impl<'db> Phase<'db> {
             .cloned()
             .filter_map(|item| item)
             .collect();
+
         let writes = T::Data::WRITES
             .iter()
             .cloned()
@@ -75,6 +96,7 @@ impl<'db> Phase<'db> {
         let transforms: Vec<(TransformationId, DynTransform)> = self
             .subphases
             .drain(..)
+            .map(|s| s.transformations)
             .flatten()
             .chain([transform_tuple].into_iter())
             .collect();
@@ -86,8 +108,10 @@ impl<'db> Phase<'db> {
         let deconflicted = graph.build();
 
         deconflicted.into_iter().for_each(|bucket| {
-            let subphase: HashMap<TransformationId, DynTransform> =
-                HashMap::from_iter(bucket.into_iter());
+            let subphase = SubPhase {
+                transformations: HashMap::from_iter(bucket.into_iter())
+            };
+
             self.subphases.push(subphase);
         });
     }
@@ -103,8 +127,9 @@ impl<'db> Phase<'db> {
             // TODO: engage multithreading here
 
             let mut subphase_results = Vec::new();
-            for (id, dyn_transformation) in subphase {
-                let transform_result = dyn_transformation.ptr.run_on(db);
+            for (id, dyn_transformation) in subphase.transformations.iter() {
+                let transform_result = dyn_transformation
+                    .ptr.run_on(db);
                 subphase_results.push((id, transform_result));
             }
         }
@@ -133,6 +158,49 @@ pub trait Transformation: 'static {
 
     fn name() -> &'static str {
         std::any::type_name::<Self>()
+    }
+}
+
+/// Represents a complete transformation, e.g., a transformation
+/// function *bound to* a selection. A single selection struct can
+/// be used by multiple transformations.
+pub trait BoundTransformation<'db> {
+    type Func;
+    type Data: Selects;
+    type Pair;
+    fn run_on(&self, db: &'db EntityDatabase) -> TransformationResult;
+    fn foobar();
+}
+
+impl<'db, F, S> BoundTransformation<'db> for (F, S)
+where
+    S: Selects,
+    F: Fn(S) -> TransformationResult
+{
+    type Data = S;
+    type Func = F;
+    type Pair = (F, S);
+
+    fn run_on(&self, db: &'db EntityDatabase) -> TransformationResult {
+        todo!()
+    }
+
+    fn foobar() {
+        println!("foobar")
+    }
+}
+
+pub trait Runs2<'db> {
+    fn run_on(&self, db: &'db EntityDatabase) -> TransformationResult;
+}
+
+impl<'db, F, S> Runs2<'db> for (F, S)
+where
+    F: Fn(S) -> TransformationResult,
+    S: Selects,
+{
+    fn run_on(&self, db: &'db EntityDatabase) -> TransformationResult {
+        todo!()
     }
 }
 
@@ -221,7 +289,7 @@ pub struct Read<C: Component> {
     marker: PhantomData<C>,
 }
 
-impl<'db, C> const SelectOne<'db> for Read<C>
+impl<'db, C> const DerefSelectionField<'db> for Read<C>
 where
     Self: 'db,
     C: Component,
@@ -247,7 +315,7 @@ pub struct Write<C: Component> {
     marker: PhantomData<C>,
 }
 
-impl<'db, C> const SelectOne<'db> for Write<C>
+impl<'db, C> const DerefSelectionField<'db> for Write<C>
 where
     Self: 'db,
     C: Component,
@@ -284,7 +352,7 @@ impl<C: Component> Selects for Global<C> {
     const GLOBAL: &'static [ComponentType] = &[ComponentType::of::<C>()];
 }
 
-impl<'db, C> const SelectOne<'db> for Global<C>
+impl<'db, C> const DerefSelectionField<'db> for Global<C>
 where
     Self: 'db,
     C: Component,
@@ -292,6 +360,26 @@ where
     type Type = C;
     type Ref = &'db Self::Type;
     type BorrowType = RawColumnRef<C>;
+}
+
+pub struct MutateGlobal<C: Component> {
+    marker: PhantomData<C>,
+}
+
+impl<C: Component> Selects for MutateGlobal<C> {
+    const READS: &'static [ComponentType] = &[];
+    const WRITES: &'static [ComponentType] = &[ComponentType::of::<C>()];
+    const GLOBAL: &'static [ComponentType] = &[];
+}
+
+impl<'db, C> const DerefSelectionField<'db> for MutateGlobal<C>
+where
+    Self: 'db,
+    C: Component,
+{
+    type Type = C;
+    type Ref = &'db mut Self::Type;
+    type BorrowType = RawColumnRefMut<C>;
 }
 
 #[const_trait]

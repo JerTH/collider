@@ -22,3 +22,11 @@ db.add_component
 
 
 */
+
+/*
+
+event stream for decision making
+ - events are accumulated in a time-ordered stream
+ - analysis is performed on the events to determine causal relationships (intent?)
+ - rules executed on the analysis produce advice
+*/

@@ -1,8 +1,8 @@
-use std::marker::PhantomData;
+use std::{marker::PhantomData, time::Instant, cell::LazyCell, sync::LazyLock};
 
-use collider_core::{ DatabaseSelection, results::TransformationResult, component::ComponentType, id::{FamilyId, FamilyIdSet} };
+use collider_core::{ DatabaseSelection, results::TransformationResult, component::{ComponentType, ComponentTypeSet}, id::{FamilyId, FamilyIdSet} };
 use collider_proc::{ component, selection };
-use crate::{indexes::spatial::{Spatial, SpatialVector, Nearby}, Write, Read, transform::Global, components::ComponentTypeSet};
+use crate::{indexes::spatial::{Spatial, SpatialVector, Nearby}, Write, Read, transform::Global};
 use crate::EntityDatabase;
 
 #[derive(Debug, Default, Clone)]
@@ -23,9 +23,9 @@ struct Physics {
 
 #[component]
 struct Time {
+    now: Option<Instant>,
     tick: u64,
     delta: f64,
-    clock: f64,
 }
 
 impl Spatial for Physics {
@@ -33,11 +33,11 @@ impl Spatial for Physics {
     type Scalar = f64;
 
     fn position(&self) -> Self::Vector {
-        todo!()
+        self.pos.clone()
     }
-
+    
     fn size_radius(&self) -> Self::Scalar {
-        todo!()
+        1.0
     }
 }
 
