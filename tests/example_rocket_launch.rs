@@ -1,4 +1,3 @@
-use std::any::type_name;
 use std::ops::Rem;
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -6,6 +5,7 @@ use std::fmt::Debug;
 use collider::indexes::spatial::{Spatial, Nearby};
 use collider::transform::{Read, Phase};
 use collider::{*, transform::{Transformation, Write}};
+use collider_core::results::TransformationResult;
 
 use crate::indexes::spatial::SpatialIndex;
 
@@ -199,7 +199,7 @@ struct PhysicsSystem {}
 impl Transformation for PhysicsSystem {
     type Data = Write<Physics>;
 
-    fn run(data: transform::Rows<Self::Data>) -> transform::TransformationResult {
+    fn run(data: transform::Rows<Self::Data>) -> TransformationResult {
         for (physics,) in data {
             physics.acceleration = physics.net_force / physics.net_mass;
             physics.velocity = f64::max(0.0, physics.velocity + physics.acceleration);
@@ -214,7 +214,7 @@ struct RocketSystem {}
 impl Transformation for RocketSystem {
     type Data = (Read<Avionics>, Write<FuelTank>, Write<MainEngine>, Write<Physics>);
 
-    fn run(data: transform::Rows<Self::Data>) -> transform::TransformationResult {
+    fn run(data: transform::Rows<Self::Data>) -> TransformationResult {
         for (avionics, fueltank, engine, physics) in data {
             if avionics.state == AvionicsState::PreLaunch {
                 continue;
@@ -227,7 +227,7 @@ impl Transformation for RocketSystem {
             } else {
                 0.0
             };
-
+            
             let thrust_now = fuel_available * engine.max_thrust * engine.throttle;
             let fuel_mass = (fueltank.wet_mass - fueltank.dry_mass) * (fueltank.cur_capacity / fueltank.max_capacity);
             physics.net_mass = f64::max(1.0, engine.mass + (fueltank.dry_mass + fuel_mass));
@@ -241,7 +241,7 @@ struct RocketAvionicsSystem {}
 impl Transformation for RocketAvionicsSystem {
     type Data = (Write<Radio>, Write<Avionics>, Write<MainEngine>, Read<Physics>);
 
-    fn run(data: transform::Rows<Self::Data>) -> transform::TransformationResult {
+    fn run(data: transform::Rows<Self::Data>) -> TransformationResult {
         for (radio, avionics, engine, _physics) in data {
             match &radio.rx {
                 RadioSignal::Message(message) => {
@@ -284,7 +284,7 @@ struct MissionControlSystem {}
 impl Transformation for MissionControlSystem {
     type Data = (Write<MissionController>, Write<Radio>);
 
-    fn run(data: transform::Rows<Self::Data>) -> transform::TransformationResult {
+    fn run(data: transform::Rows<Self::Data>) -> TransformationResult {
         for (control, radio) in data {
             radio.ch = 0;
             if control.countdown > 0 {
@@ -316,7 +316,7 @@ struct RadioSystem {}
 impl Transformation for RadioSystem {
     type Data = Write<Radio>;
 
-    fn run(data: transform::Rows<Self::Data>) -> transform::TransformationResult {       
+    fn run(data: transform::Rows<Self::Data>) -> TransformationResult {       
         let mut channels: HashMap<usize, RadioSignal> = Default::default();
 
         for (radio,) in &data {
